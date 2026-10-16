@@ -73,8 +73,11 @@ footer { margin-top: 64px; background: var(--navy); color: #DCE4EF; padding: 24p
 
 
 def _money(value):
-    return f"${value:.4f}" if value < 1 else f"${value:.2f}"
-
+    if value >= 1:
+        return f"${value:.2f}"
+    if 0 < value < 0.0001:
+        return f"${value:.5f}"  # tiny costs stay visible instead of rounding to $0.0000
+    return f"${value:.4f}"
 
 def _pill(status):
     colour = STATUS_COLOURS.get(status, "#C5D1DE")
@@ -125,7 +128,7 @@ def _body(run_id=None):
 
     runs_html = "".join(
         f"""<div class="run {'current' if r['id'] == run_id else ''}">
-          <span class="meta">Run {r['id']} · {escape(r['status'])}</span>
+            <span class="meta">Run {r['id']} · {escape(r['status'].replace('_', ' '))}</span>
           <span class="num">{_money(r['cost_usd'])}</span>
         </div>"""
         for r in reversed(runs[-8:])
