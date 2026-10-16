@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+board.db
+dashboard.html
+dashboard_data.js
