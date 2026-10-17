@@ -3,7 +3,10 @@
 - Timeout and retries, so a stalled connection becomes a visible error, not a silent hang.
 - Never starts a call the run can't afford, and stops the run when the budget is used up.
 - Records tokens and cost on the task board, and refreshes the dashboard, after every call.
+- ask_json() returns structured answers through tool use, so replies are always valid JSON.
 """
+
+import json
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -33,13 +36,14 @@ def _stop(run_id, reason):
     raise BudgetExceeded(reason)
 
 
-def ask(run_id, agent, prompt, *, system=None, model=SMART, max_tokens=1000, task_id=None):
-    """Call Claude once on behalf of an agent and return the text of its reply."""
+def _call(run_id, agent, prompt, system, model, max_tokens, task_id, **extra):
+    """One model call with the budget check before it and cost tracking after it."""
     budget = _budget(run_id)
     spent = board.run_cost(run_id)
 
     # Worst case for this call: roughly 1 token per 3 characters in, and max_tokens out.
-    worst_case = board.cost_of(model, (len(prompt) + len(system or "")) // 3, max_tokens)
+    in_chars = len(prompt) + len(system or "") + len(json.dumps(extra.get("tools", "")))
+    worst_case = board.cost_of(model, in_chars // 3 + (400 if "tools" in extra else 0), max_tokens)
     if spent + worst_case > budget:
         money = dashboard._money
         left = money(budget - spent)
@@ -49,16 +53,38 @@ def ask(run_id, agent, prompt, *, system=None, model=SMART, max_tokens=1000, tas
         "model": model,
         "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
+        **extra,
     }
     if system:
         request["system"] = system
     response = _client.messages.create(**request)
 
-    text = "".join(block.text for block in response.content if block.type == "text")
     board.record_call(run_id, agent, model, response.usage.input_tokens,
                       response.usage.output_tokens, task_id=task_id)
     dashboard.render(run_id)
-    return text
+    return response
+
+
+def ask(run_id, agent, prompt, *, system=None, model=SMART, max_tokens=1000, task_id=None):
+    """Call Claude once on behalf of an agent and return the text of its reply."""
+    response = _call(run_id, agent, prompt, system, model, max_tokens, task_id)
+    return "".join(block.text for block in response.content if block.type == "text")
+
+
+def ask_json(run_id, agent, prompt, schema, *, system=None, model=SMART,
+             max_tokens=1000, task_id=None):
+    """Like ask(), but returns a dict. Claude must answer through a 'submit' tool whose
+    input follows `schema`, so the reply always arrives as valid JSON."""
+    tool = {"name": "submit", "description": "Submit your answer.", "input_schema": schema}
+    prompt += "\n\nAnswer only by calling the submit tool."
+    response = _call(run_id, agent, prompt, system, model, max_tokens, task_id,
+                     tools=[tool], tool_choice={"type": "auto"})
+    if response.stop_reason == "max_tokens":
+        raise ValueError("The answer was cut off before it finished.")
+    for block in response.content:
+        if block.type == "tool_use":
+            return block.input
+    raise ValueError("No structured answer in the reply.")
 
 
 if __name__ == "__main__":

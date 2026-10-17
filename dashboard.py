@@ -24,6 +24,8 @@ STATUS_COLOURS = {
     "running": "#F2B33D",
     "queued": "#C5D1DE",
     "waiting_review": "#F2B33D",
+    "revising": "#F2B33D",
+    "needs_human": "#E98A4E",
     "failed": "#E98A4E",
     "stopped_budget": "#E98A4E",
 }

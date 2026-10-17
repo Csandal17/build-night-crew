@@ -1,0 +1,12 @@
+title: Vitamin D
+publisher: NHS
+url: https://www.nhs.uk/conditions/vitamins-and-minerals/vitamin-d/
+page last reviewed: 3 August 2020
+---
+Government advice is that everyone should consider taking a daily vitamin D supplement during the autumn and winter.
+
+[...] should consider taking a daily supplement containing 10 micrograms of vitamin D during the autumn and winter.
+
+Taking too many vitamin D supplements over a long period of time can cause too much calcium to build up in the body [...] This can weaken the bones and damage the kidneys and the heart.
+
+Do not take more than 100 micrograms (4,000 IU) of vitamin D a day as it could be harmful.
