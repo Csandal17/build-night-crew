@@ -7,8 +7,9 @@ and a reviewer checks each one before it counts.
 - One revision per task; anything still failing is flagged for a human.
 - The final brief is assembled by code from reviewed results only.
 
-Run: uv run crew.py            (uses DEFAULT_GOAL)
-     uv run crew.py "a goal"   (any goal the source pack can answer)
+Run: uv run crew.py              (uses DEFAULT_GOAL)
+     uv run crew.py "a goal"     (any goal the source pack can answer)
+     uv run crew.py --challenge  (plants one known mistake to prove the reviewer catches it)
 """
 
 import json
@@ -39,12 +40,14 @@ PLAN_SCHEMA = {
     "properties": {"tasks": {"type": "array", "maxItems": 3, "items": {
         "type": "object",
         "properties": {
-            "title": {"type": "string", "description": "short claim or task name"},
+            "title": {"type": "string", "description": "short task name"},
+            "claim": {"type": "string",
+                      "description": "the exact claim to check, copied word for word from the goal"},
             "instructions": {"type": "string", "description": "what the worker must do"},
             "acceptance": {"type": "array", "maxItems": 3, "items": {"type": "string"},
                            "description": "checkable criteria"},
         },
-        "required": ["title", "instructions", "acceptance"],
+        "required": ["title", "claim", "instructions", "acceptance"],
     }}},
     "required": ["tasks"],
 }
@@ -151,7 +154,9 @@ def coordinator(run_id, goal, sources):
         "Keep each task short: a title under 10 words, instructions in one sentence, "
         "at most 3 acceptance criteria. "
         "Workers answer with a verdict of supported, contradicted or inconclusive plus exact quotes; "
-        "acceptance criteria must not require other verdict labels or quote locations.\n\n"
+        "acceptance criteria must not require other verdict labels or quote locations. "
+        "Copy each claim word for word from the goal into the claim field, so every agent "
+        "checks exactly what the goal says.\n\n"
         f"Goal: {goal}\n\nSources the workers will have (titles only):\n{titles}"
     )
     plan = ask_json(run_id, "coordinator", prompt, PLAN_SCHEMA,
@@ -161,6 +166,7 @@ def coordinator(run_id, goal, sources):
 
 def worker(run_id, task_id, task, sources, feedback=None, previous=None):
     prompt = (
+        f"Claim to check: {task.get('claim', task['title'])}\n"
         f"Task: {task['title']}\nInstructions: {task['instructions']}\n"
         f"Acceptance criteria:\n{_bullets(task['acceptance'])}\n\n"
         f"Sources:\n{_format_sources(sources)}"
@@ -192,7 +198,9 @@ def code_check(answer, sources):
 def reviewer(run_id, task_id, task, answer, sources):
     cited = sorted({e["source"] for e in answer.get("evidence", []) if e.get("source") in sources})
     prompt = (
-        f"Task: {task['title']}\nAcceptance criteria:\n{_bullets(task['acceptance'])}\n\n"
+        f"Claim being checked: {task.get('claim', task['title'])}\n"
+        f"Task: {task['title']}\nInstructions: {task['instructions']}\n"
+        f"Acceptance criteria:\n{_bullets(task['acceptance'])}\n\n"
         f"Worker's answer:\n{json.dumps(answer, indent=2)}\n\n"
         f"Text of the sources it cited:\n{_format_sources(sources, cited) if cited else '(none)'}\n\n"
         "Code has already confirmed every quote appears word for word in its source."
@@ -201,12 +209,26 @@ def reviewer(run_id, task_id, task, answer, sources):
                     model=REVIEWER_MODEL, max_tokens=1000, task_id=task_id)
 
 
+# ---------- challenge mode ----------
+
+FLIPS = {"supported": "contradicted", "contradicted": "supported", "inconclusive": "supported"}
+
+
+def plant_mistake(answer):
+    """Return a copy of a real answer with its verdict deliberately flipped.
+    The quotes stay real, so the code check passes and only the reviewer can catch it."""
+    wrong = dict(answer, verdict=FLIPS.get(answer.get("verdict"), "supported"))
+    note = (f"Challenge mode: verdict changed on purpose from "
+            f"{answer.get('verdict')} to {wrong['verdict']}.")
+    return wrong, note
+
+
 # ---------- one task, start to finish ----------
 
-def run_task(run_id, task, sources):
+def run_task(run_id, task, sources, plant=False):
     task_id = board.add_task(run_id, task["title"], owner="unassigned")
     _set(run_id, task_id, owner=f"worker-{task_id}")
-    answer, feedback, caught = None, None, []
+    answer, feedback, caught, planted = None, None, [], None
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         _set(run_id, task_id, status="running" if attempt == 1 else "revising", attempts=attempt)
@@ -218,7 +240,10 @@ def run_task(run_id, task, sources):
             _set(run_id, task_id, review_notes=f"Sent back: {feedback}")
             continue
 
-        result = f"{answer.get('verdict', '?').upper()}: {answer.get('summary', '')}"
+        if plant and attempt == 1:
+            answer, planted = plant_mistake(answer)
+        label = "PLANTED MISTAKE, " if planted and attempt == 1 else ""
+        result = f"{label}{answer.get('verdict', '?').upper()}: {answer.get('summary', '')}"
         problems = code_check(answer, sources)
         if problems:
             feedback = "Code check: " + " ".join(problems)
@@ -233,18 +258,31 @@ def run_task(run_id, task, sources):
             review = {"verdict": "revise", "notes": "Reviewer reply could not be read."}
         notes = review.get("notes", "").strip()
         if review.get("verdict") == "pass":
-            summary = (f"Caught: {caught[-1]} Fixed and passed." if caught
-                       else f"Passed: {notes}")
+            if planted and attempt == 1:
+                # The reviewer approved a known-wrong answer: never publish it.
+                missed = f"Challenge failed: the reviewer passed the planted mistake. {planted}"
+                _set(run_id, task_id, status="needs_human", review_notes=missed)
+                return {"task": task, "answer": answer, "status": "needs_human",
+                        "attempts": attempt, "review": missed, "caught": caught,
+                        "planted": planted, "planted_caught": False}
+            if planted:
+                summary = f"Planted mistake caught: {caught[0]} Fixed and passed."
+            elif caught:
+                summary = f"Caught: {caught[-1]} Fixed and passed."
+            else:
+                summary = f"Passed: {notes}"
             _set(run_id, task_id, status="done", review_notes=summary)
             return {"task": task, "answer": answer, "status": "done",
-                    "attempts": attempt, "review": notes, "caught": caught}
+                    "attempts": attempt, "review": notes, "caught": caught,
+                    "planted": planted, "planted_caught": bool(planted)}
         feedback = notes
         caught.append(notes)
         _set(run_id, task_id, review_notes=f"Sent back: {notes}")
 
     _set(run_id, task_id, status="needs_human")
     return {"task": task, "answer": answer, "status": "needs_human",
-            "attempts": MAX_ATTEMPTS, "review": feedback, "caught": caught}
+            "attempts": MAX_ATTEMPTS, "review": feedback, "caught": caught,
+            "planted": planted, "planted_caught": bool(planted and caught)}
 
 
 # ---------- the brief, assembled by code ----------
@@ -258,13 +296,15 @@ def write_brief(run_id, goal, results, sources):
         "| Claim | Verdict | Review |", "|---|---|---|",
     ]
     for r in results:
-        verdict = (r["answer"] or {}).get("verdict", "unverified")
-        status = "passed" if r["status"] == "done" else "**needs a human**"
+        done = r["status"] == "done"
+        verdict = (r["answer"] or {}).get("verdict", "unverified") if done else "unverified"
+        status = "passed" if done else "**needs a human**"
         lines.append(f"| {r['task']['title']} | {verdict} | {status}, attempt {r['attempts']} |")
 
     for n, r in enumerate(results, start=1):
         answer = r["answer"] or {}
-        lines += ["", f"## {n}. {r['task']['title']}", ""]
+        lines += ["", f"## {n}. {r['task']['title']}", "",
+                  f"_Claim: {r['task'].get('claim', r['task']['title'])}_", ""]
         if r["status"] != "done":
             lines.append(f"**Not verified by the crew.** Last reviewer note: {r['review']}")
             continue
@@ -273,7 +313,10 @@ def write_brief(run_id, goal, results, sources):
             s = sources[e["source"]]
             lines.append(f"> \"{e['quote']}\"  \n> [{e['source']}] "
                          f"[{s.get('publisher', '')}: {s.get('title', '')}]({s.get('url', '')})")
-        if r["caught"]:
+        if r.get("planted"):
+            lines += ["", f"_{r['planted']} Caught in review: {r['caught'][0]} "
+                          f"Fixed on attempt {r['attempts']}._"]
+        elif r["caught"]:
             lines += ["", f"_Caught in review: {r['caught'][-1]} "
                           f"Fixed on attempt {r['attempts']}._"]
         else:
@@ -289,9 +332,10 @@ def write_brief(run_id, goal, results, sources):
 
 # ---------- main ----------
 
-def main(goal):
+def main(goal, challenge=False):
     sources = load_sources()
-    run_id = board.start_run(goal, budget_usd=BUDGET_USD)
+    label = f"Challenge run: {goal}" if challenge else goal
+    run_id = board.start_run(label, budget_usd=BUDGET_USD)
     dashboard.render(run_id)
     print(f"Run {run_id} started with {len(sources)} sources and a "
           f"{dashboard._money(BUDGET_USD)} budget. Watch the dashboard.")
@@ -299,14 +343,18 @@ def main(goal):
         tasks = coordinator(run_id, goal, sources)
         print(f"Coordinator made {len(tasks)} tasks.")
         results = []
-        for task in tasks:
-            r = run_task(run_id, task, sources)
+        for n, task in enumerate(tasks):
+            r = run_task(run_id, task, sources, plant=challenge and n == 0)
             print(f"  {r['status']:<12} attempt {r['attempts']}  {task['title']}")
             results.append(r)
         status = "completed" if all(r["status"] == "done" for r in results) else "needs_human"
         board.finish_run(run_id, status=status)
         path = write_brief(run_id, goal, results, sources)
         print(f"Run {run_id} {status}. Brief: {path.relative_to(HERE)}")
+        if challenge:
+            caught = any(r.get("planted_caught") for r in results)
+            print("Challenge: the planted mistake was caught and fixed." if caught
+                  else "Challenge: the planted mistake was NOT caught. It was held back for a human.")
     except BudgetExceeded as stop:
         print(f"Run {run_id} stopped by the budget cap. {stop}")
     except Exception:
@@ -318,5 +366,8 @@ def main(goal):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else DEFAULT_GOAL)
+    args = sys.argv[1:]
+    challenge = "--challenge" in args
+    args = [a for a in args if a != "--challenge"]
+    main(args[0] if args else DEFAULT_GOAL, challenge=challenge)
     
