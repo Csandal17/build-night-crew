@@ -17,6 +17,7 @@ import board
 OUT_PATH = Path(__file__).parent / "dashboard.html"
 DATA_PATH = Path(__file__).parent / "dashboard_data.js"
 REFRESH_SECONDS = 3
+LONG_GOAL_CHARS = 80  # longer goals get a smaller headline clamped to 3 lines
 
 STATUS_COLOURS = {
     "done": "#7FB77E",
@@ -45,6 +46,8 @@ h1, h2, h3, .num, .label { font-family: 'Bricolage Grotesque', 'Avenir Next', 'S
 .hero { background: var(--navy); color: var(--hero-text); padding: 48px 0 56px; }
 .eyebrow { color: #B9C6DA; font-size: 16px; margin: 0 0 8px; }
 .hero h1 { font-size: clamp(28px, 4vw, 40px); font-weight: 700; margin: 0 0 32px; line-height: 1.2; }
+.hero h1.long { font-size: clamp(20px, 2.6vw, 26px); display: -webkit-box; -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 .big { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
 .big .num { font-size: clamp(64px, 12vw, 120px); font-weight: 800; line-height: 1; letter-spacing: -0.02em; }
 .big .of { font-size: 20px; color: #DCE4EF; }
@@ -136,9 +139,11 @@ def _body(run_id=None):
         for r in reversed(runs[-8:])
     )
 
+    goal = run["goal"]
+    long_goal = len(goal) > LONG_GOAL_CHARS
     return f"""<div class="hero"><div class="wrap">
   <p class="eyebrow">Run {run['id']} · {_pill(run['status'])}</p>
-  <h1>{escape(run['goal'])}</h1>
+  <h1{f' class="long" title="{escape(goal)}"' if long_goal else ''}>{escape(goal)}</h1>
   <div class="big"><span class="num">{_money(total)}</span>
     <span class="of">of {_money(budget)} budget · {used_pct:.0f}% used</span></div>
   <div class="budget"><span style="width:{used_pct:.1f}%"></span></div>

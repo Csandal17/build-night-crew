@@ -26,3 +26,13 @@ ANTHROPIC_API_KEY=your-key-here
 ```bash
 uv run main.py
 ```
+
+## Run the crew
+
+```bash
+uv run crew.py               # run the evidence crew on the default goal; writes a brief to output/
+uv run crew.py --challenge   # plant one known mistake to prove the reviewer catches it
+uv run dashboard.py          # open the live dashboard (keep it open while the crew runs)
+```
+
+The source pack lives in `sources/`: one `.txt` file per source, with header lines, then `---`, then the excerpt.
