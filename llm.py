@@ -3,7 +3,8 @@
 - Timeout and retries, so a stalled connection becomes a visible error, not a silent hang.
 - Never starts a call the run can't afford, and stops the run when the budget is used up.
 - Records tokens and cost on the task board, and refreshes the dashboard, after every call.
-- ask_json() returns structured answers through tool use, so replies are always valid JSON.
+- ask_json() asks for structured answers through tool use, so replies arrive as valid JSON
+  (or as a clear error the crew can retry).
 """
 
 import json
@@ -73,8 +74,8 @@ def ask(run_id, agent, prompt, *, system=None, model=SMART, max_tokens=1000, tas
 
 def ask_json(run_id, agent, prompt, schema, *, system=None, model=SMART,
              max_tokens=1000, task_id=None):
-    """Like ask(), but returns a dict. Claude must answer through a 'submit' tool whose
-    input follows `schema`, so the reply always arrives as valid JSON."""
+    """Like ask(), but returns a dict. Claude is asked to answer through a 'submit' tool
+    whose input follows `schema`; if it doesn't, a ValueError says so."""
     tool = {"name": "submit", "description": "Submit your answer.", "input_schema": schema}
     prompt += "\n\nAnswer only by calling the submit tool."
     response = _call(run_id, agent, prompt, system, model, max_tokens, task_id,

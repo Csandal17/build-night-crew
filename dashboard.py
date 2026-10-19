@@ -84,6 +84,13 @@ def _money(value):
         return f"${value:.5f}"  # tiny costs stay visible instead of rounding to $0.0000
     return f"${value:.4f}"
 
+def _clip(text, limit):
+    """Shorten long text at a word boundary, so cards never end mid-word."""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(",.:;") + "\u2026"
+
+
 def _pill(status):
     colour = STATUS_COLOURS.get(status, "#C5D1DE")
     return f'<span class="pill" style="background:{colour}">{escape(status.replace("_", " "))}</span>'
@@ -125,8 +132,8 @@ def _body(run_id=None):
           <h3>{escape(t['title'])}</h3>
           {_pill(t['status'])}
           <p class="meta">{escape(t['owner'] or 'unassigned')} · attempts {t['attempts']} · {_money(task_costs.get(t['id'], 0))}</p>
-          {f"<p>{escape(t['result'][:220])}</p>" if t['result'] else ''}
-          {f"<p class='meta'>Review: {escape(t['review_notes'][:160])}</p>" if t['review_notes'] else ''}
+          {f"<p>{escape(_clip(t['result'], 320))}</p>" if t['result'] else ''}
+          {f"<p class='meta'>Review: {escape(_clip(t['review_notes'], 280))}</p>" if t['review_notes'] else ''}
         </div>"""
         for t in s["tasks"]
     ) or "<p class='meta'>No tasks yet.</p>"
@@ -145,7 +152,7 @@ def _body(run_id=None):
   <p class="eyebrow">Run {run['id']} · {_pill(run['status'])}</p>
   <h1{f' class="long" title="{escape(goal)}"' if long_goal else ''}>{escape(goal)}</h1>
   <div class="big"><span class="num">{_money(total)}</span>
-    <span class="of">of {_money(budget)} budget · {used_pct:.0f}% used</span></div>
+    <span class="of">of {f"${budget:.2f}" if budget >= 0.01 else _money(budget)} budget · {used_pct:.0f}% used</span></div>
   <div class="budget"><span style="width:{used_pct:.1f}%"></span></div>
 </div></div>
 <div class="wrap">

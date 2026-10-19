@@ -76,6 +76,8 @@ REVIEW_SCHEMA = {
     "required": ["verdict", "notes"],
 }
 
+DEFAULT_TITLE = "Evidence check: three supplement claims"
+
 DEFAULT_GOAL = (
     "Check these three supplement claims against the source pack and produce "
     "a one-page evidence brief: "
@@ -143,6 +145,13 @@ def _bullets(items):
     return "\n".join(f"- {item}" for item in items)
 
 
+def _short_title(goal, limit=60):
+    """A short headline for the dashboard; the full goal stays in the brief."""
+    if len(goal) <= limit:
+        return goal
+    return goal[:limit].rsplit(" ", 1)[0].rstrip(",.:;") + "\u2026"
+
+
 # ---------- agents ----------
 
 def coordinator(run_id, goal, sources):
@@ -164,7 +173,7 @@ def coordinator(run_id, goal, sources):
     return plan["tasks"][:MAX_TASKS]
 
 
-def worker(run_id, task_id, task, sources, feedback=None, previous=None):
+def worker(run_id, task_id, task, sources, feedback=None, previous=None, agent="worker"):
     prompt = (
         f"Claim to check: {task.get('claim', task['title'])}\n"
         f"Task: {task['title']}\nInstructions: {task['instructions']}\n"
@@ -174,7 +183,7 @@ def worker(run_id, task_id, task, sources, feedback=None, previous=None):
     if feedback:
         prompt += (f"\n\nYour previous answer:\n{json.dumps(previous)}\n\n"
                    f"A reviewer asked for changes: {feedback}\nFix exactly that.")
-    return ask_json(run_id, f"worker-{task_id}", prompt, ANSWER_SCHEMA, system=WORKER_SYSTEM,
+    return ask_json(run_id, agent, prompt, ANSWER_SCHEMA, system=WORKER_SYSTEM,
                     model=WORKER_MODEL, max_tokens=1200, task_id=task_id)
 
 
@@ -195,7 +204,7 @@ def code_check(answer, sources):
     return problems
 
 
-def reviewer(run_id, task_id, task, answer, sources):
+def reviewer(run_id, task_id, task, answer, sources, model=REVIEWER_MODEL):
     cited = sorted({e["source"] for e in answer.get("evidence", []) if e.get("source") in sources})
     prompt = (
         f"Claim being checked: {task.get('claim', task['title'])}\n"
@@ -206,7 +215,7 @@ def reviewer(run_id, task_id, task, answer, sources):
         "Code has already confirmed every quote appears word for word in its source."
     )
     return ask_json(run_id, "reviewer", prompt, REVIEW_SCHEMA, system=REVIEWER_SYSTEM,
-                    model=REVIEWER_MODEL, max_tokens=1000, task_id=task_id)
+                    model=model, max_tokens=1000, task_id=task_id)
 
 
 # ---------- challenge mode ----------
@@ -225,15 +234,16 @@ def plant_mistake(answer):
 
 # ---------- one task, start to finish ----------
 
-def run_task(run_id, task, sources, plant=False):
-    task_id = board.add_task(run_id, task["title"], owner="unassigned")
-    _set(run_id, task_id, owner=f"worker-{task_id}")
+def run_task(run_id, task, sources, plant=False, agent="worker-1",
+             reviewer_model=REVIEWER_MODEL):
+    task_id = board.add_task(run_id, task["title"], owner=agent)
+    dashboard.render(run_id)
     answer, feedback, caught, planted = None, None, [], None
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         _set(run_id, task_id, status="running" if attempt == 1 else "revising", attempts=attempt)
         try:
-            answer = worker(run_id, task_id, task, sources, feedback, answer)
+            answer = worker(run_id, task_id, task, sources, feedback, answer, agent=agent)
         except (ValueError, KeyError) as bad_reply:
             feedback = f"Your answer could not be used ({bad_reply}) Try again and keep it short."
             caught.append(feedback)
@@ -253,7 +263,7 @@ def run_task(run_id, task, sources, plant=False):
 
         _set(run_id, task_id, status="waiting_review", result=result)
         try:
-            review = reviewer(run_id, task_id, task, answer, sources)
+            review = reviewer(run_id, task_id, task, answer, sources, model=reviewer_model)
         except (ValueError, KeyError):
             review = {"verdict": "revise", "notes": "Reviewer reply could not be read."}
         notes = review.get("notes", "").strip()
@@ -324,7 +334,7 @@ def write_brief(run_id, goal, results, sources):
 
     lines += ["", "---",
               f"Crew cost: {dashboard._money(board.run_cost(run_id))} "
-              f"of a {dashboard._money(BUDGET_USD)} budget."]
+              f"of a ${BUDGET_USD:.2f} budget."]
     path = OUTPUT_DIR / f"brief_run{run_id}.md"
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
@@ -332,19 +342,23 @@ def write_brief(run_id, goal, results, sources):
 
 # ---------- main ----------
 
-def main(goal, challenge=False):
+def main(goal, challenge=False, fast_reviewer=False):
+    reviewer_model = FAST if fast_reviewer else REVIEWER_MODEL
     sources = load_sources()
-    label = f"Challenge run: {goal}" if challenge else goal
+    title = DEFAULT_TITLE if goal == DEFAULT_GOAL else _short_title(goal)
+    tags = [name for name, on in (("Challenge", challenge), ("Haiku reviewer", fast_reviewer)) if on]
+    label = f"{title} \u00b7 {' + '.join(tags)}" if tags else title
     run_id = board.start_run(label, budget_usd=BUDGET_USD)
     dashboard.render(run_id)
     print(f"Run {run_id} started with {len(sources)} sources and a "
-          f"{dashboard._money(BUDGET_USD)} budget. Watch the dashboard.")
+          f"${BUDGET_USD:.2f} budget. Reviewer: {reviewer_model}. Watch the dashboard.")
     try:
         tasks = coordinator(run_id, goal, sources)
         print(f"Coordinator made {len(tasks)} tasks.")
         results = []
         for n, task in enumerate(tasks):
-            r = run_task(run_id, task, sources, plant=challenge and n == 0)
+            r = run_task(run_id, task, sources, plant=challenge and n == 0,
+                         agent=f"worker-{n + 1}", reviewer_model=reviewer_model)
             print(f"  {r['status']:<12} attempt {r['attempts']}  {task['title']}")
             results.append(r)
         status = "completed" if all(r["status"] == "done" for r in results) else "needs_human"
@@ -368,6 +382,6 @@ def main(goal, challenge=False):
 if __name__ == "__main__":
     args = sys.argv[1:]
     challenge = "--challenge" in args
-    args = [a for a in args if a != "--challenge"]
-    main(args[0] if args else DEFAULT_GOAL, challenge=challenge)
-    
+    fast_reviewer = "--fast-reviewer" in args
+    args = [a for a in args if a not in ("--challenge", "--fast-reviewer")]
+    main(args[0] if args else DEFAULT_GOAL, challenge=challenge, fast_reviewer=fast_reviewer)
