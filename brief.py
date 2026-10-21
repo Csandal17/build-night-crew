@@ -15,6 +15,7 @@ is capped at under 2,000 characters, so one briefing stays small.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -50,12 +51,29 @@ def _name(source):
     return Path(source).stem.replace("-", " ").replace("_", " ").capitalize()
 
 
-def _sentence(text, limit=170):
-    """Shorten at a word boundary and end with a full stop, since it will be read aloud."""
+def _sentence(text, limit=150):
+    """As many whole sentences as fit in `limit` characters, since it will be read aloud.
+    Only a single over-long sentence gets cut, at a word boundary."""
     text = " ".join((text or "").split())
-    if len(text) > limit:
-        text = text[:limit].rsplit(" ", 1)[0].rstrip(",.:;")
-    return text if text.endswith((".", "!", "?")) else text + "."
+    if not text:
+        return ""
+    spoken = ""
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        if len(spoken) + len(sentence) + 1 > limit:
+            break
+        spoken = f"{spoken} {sentence}".strip()
+    if not spoken:
+        spoken = text[:limit].rsplit(" ", 1)[0].rstrip(",.:;")
+    return spoken if spoken.endswith((".", "!", "?")) else spoken + "."
+
+
+def _topic(title):
+    """'Check UK adult vitamin D advice' -> 'UK adult vitamin D advice'"""
+    title = (title or "").strip()
+    for prefix in ("Check ", "Checking ", "Verify "):
+        if title.startswith(prefix):
+            title = title[len(prefix):]
+    return title[:1].upper() + title[1:]
 
 
 def _count(n, one, many):
@@ -79,8 +97,10 @@ def _clock(iso):
 
 # ---------- the script, written by code from the board ----------
 
-def _event_lines(event):
-    """What to say about one piece of work. Returns (lines, needs_you)."""
+def _event_lines(event, tally):
+    """What to say about one piece of work. Returns (lines, needs_you).
+    The reviewer's voice only speaks when something happened worth hearing;
+    routine passes are added to `tally` and summed up once at the end."""
     name = _name(event["source"])
     if event["status"] == "failed":
         return [("narrator", f"{name} could not be run. {_sentence(event['error'])}")], True
@@ -96,26 +116,43 @@ def _event_lines(event):
         return [("narrator", f"{name} stopped at its budget cap before finishing.")], True
 
     lines, needs_you = [], False
+    several = len(s["tasks"]) > 1
     for task in s["tasks"]:
+        label = f"{name}, {_topic(task['title'])}" if several else name
         head, _, summary = (task["result"] or "").partition(": ")
         verdict = head.replace("PLANTED MISTAKE, ", "").strip().lower() or "no verdict"
         notes = task["review_notes"] or ""
         if task["status"] == "done":
-            lines.append(("narrator", f"{name}: {verdict}. {_sentence(summary)}"))
+            tally["passed"] += 1
+            if "Gemini agreed" in notes or "Both reviewers passed" in notes:
+                tally["both"] += 1
+            lines.append(("narrator", f"{label}: {verdict}. {_sentence(summary)}".strip()))
             if notes.startswith(("Caught:", "Planted mistake caught:")):
                 caught = notes.split(": ", 1)[1]
                 for ending in (" Both reviewers passed it.", " Fixed and passed."):
                     caught = caught.replace(ending, "")
-                lines.append(("reviewer", f"I sent this one back first. {_sentence(caught, 150)} "
+                lines.append(("reviewer", f"I sent this one back first. {_sentence(caught, 140)} "
                                           "It was fixed, and then it passed."))
-            elif "Gemini agreed" in notes:
-                lines.append(("reviewer", "Two independent reviewers checked it, and both passed it."))
         else:
             needs_you = True
             reason = notes.split(": ", 1)[-1] if notes else "The reviewers could not pass it."
-            lines.append(("reviewer", f"I couldn't sign off {name.lower()}. {_sentence(reason, 150)} "
+            lines.append(("reviewer", f"I couldn't sign off {label[:1].lower() + label[1:]}. "
+                                      f"{_sentence(reason, 140)} "
                                       "It needs your decision."))
     return lines, needs_you
+
+
+def _review_summary(tally):
+    """One line from the reviewer about the routine passes."""
+    passed, both = tally["passed"], tally["both"]
+    if not passed:
+        return None
+    if both == passed:
+        return ("Both reviewers passed it." if passed == 1 else
+                f"Both reviewers, Claude and Gemini, independently passed all {passed} verdicts.")
+    if both:
+        return f"Both reviewers passed {both} of the {passed} verdicts. I passed the rest on my own."
+    return "I passed it." if passed == 1 else f"I passed all {passed} verdicts."
 
 
 def build_script(show_all=False):
@@ -136,23 +173,34 @@ def build_script(show_all=False):
               ("waiting", "waiting"), ("failed", "could not run"))
     parts = [f"{counts[k]} {label}" for k, label in labels if counts.get(k)]
     opener = f"Here's your crew briefing. Since {_clock(since)}, " if since else "Here's your crew briefing. "
-    opener += f"{_count(changed, 'piece of work', 'pieces of work')} changed: {_list(parts)}."
+    work = _count(changed, "piece of work", "pieces of work")
+    if counts.get("done") == changed:
+        opener += f"{work} finished." if changed > 1 else "1 piece of work finished."
+    else:
+        opener += f"{work} changed: {_list(parts)}."
     closing_start = f"Spent today: {_cents(board.spent_today())}."
 
     lines = [("narrator", opener)]
     needs_you = []
-    used = len(opener) + len(closing_start) + 120  # room for the closing line
+    tally = {"passed": 0, "both": 0}
+    used = len(opener) + len(closing_start) + 220  # room for the review summary and closing
     told = 0
     for event in events:
-        block, needs = _event_lines(event)
+        event_tally = {"passed": 0, "both": 0}
+        block, needs = _event_lines(event, event_tally)
         size = sum(len(text) for _, text in block)
         if used + size > MAX_CHARS:
             break
         lines += block
         used += size
         told += 1
+        for key in tally:
+            tally[key] += event_tally[key]
         if needs:
             needs_you.append(_name(event["source"]).lower())
+    summary = _review_summary(tally)
+    if summary:
+        lines.append(("reviewer", summary))
     if changed > told:
         lines.append(("narrator", f"There's {_count(changed - told, 'more item', 'more items')} on the dashboard."))
 
