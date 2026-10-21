@@ -10,6 +10,7 @@ and a reviewer checks each one before it counts.
 Run: uv run crew.py              (uses DEFAULT_GOAL)
      uv run crew.py "a goal"     (any goal the source pack can answer)
      uv run crew.py --challenge  (plants one known mistake to prove the reviewer catches it)
+     uv run crew.py --gemini     (Gemini gives a second, independent review; both must pass)
 """
 
 import json
@@ -18,6 +19,7 @@ from pathlib import Path
 
 import board
 import dashboard
+import gemini
 from llm import FAST, SMART, BudgetExceeded, ask_json
 
 HERE = Path(__file__).parent
@@ -218,6 +220,21 @@ def reviewer(run_id, task_id, task, answer, sources, model=REVIEWER_MODEL):
                     model=model, max_tokens=1000, task_id=task_id)
 
 
+def second_reviewer(run_id, task_id, task, answer, sources):
+    """The same review, done independently by Gemini. It never sees the first reviewer's notes."""
+    cited = sorted({e["source"] for e in answer.get("evidence", []) if e.get("source") in sources})
+    prompt = (
+        f"Claim being checked: {task.get('claim', task['title'])}\n"
+        f"Task: {task['title']}\nInstructions: {task['instructions']}\n"
+        f"Acceptance criteria:\n{_bullets(task['acceptance'])}\n\n"
+        f"Worker's answer:\n{json.dumps(answer, indent=2)}\n\n"
+        f"Text of the sources it cited:\n{_format_sources(sources, cited) if cited else '(none)'}\n\n"
+        "Code has already confirmed every quote appears word for word in its source."
+    )
+    return gemini.ask_json(run_id, "gemini-reviewer", prompt, REVIEW_SCHEMA,
+                           system=REVIEWER_SYSTEM, task_id=task_id)
+
+
 # ---------- challenge mode ----------
 
 FLIPS = {"supported": "contradicted", "contradicted": "supported", "inconclusive": "supported"}
@@ -235,7 +252,7 @@ def plant_mistake(answer):
 # ---------- one task, start to finish ----------
 
 def run_task(run_id, task, sources, plant=False, agent="worker-1",
-             reviewer_model=REVIEWER_MODEL):
+             reviewer_model=REVIEWER_MODEL, use_gemini=False):
     task_id = board.add_task(run_id, task["title"], owner=agent)
     dashboard.render(run_id)
     answer, feedback, caught, planted = None, None, [], None
@@ -275,11 +292,33 @@ def run_task(run_id, task, sources, plant=False, agent="worker-1",
                 return {"task": task, "answer": answer, "status": "needs_human",
                         "attempts": attempt, "review": missed, "caught": caught,
                         "planted": planted, "planted_caught": False}
+            if use_gemini:
+                # Both reviewers must pass. Gemini only runs once Claude has passed the work.
+                _set(run_id, task_id, review_notes="First review passed. Asking Gemini for a second opinion.")
+                try:
+                    second = second_reviewer(run_id, task_id, task, answer, sources)
+                except BudgetExceeded:
+                    raise
+                except Exception as error:
+                    unavailable = f"Second review unavailable, so not verified: {error}"
+                    _set(run_id, task_id, status="needs_human", review_notes=unavailable)
+                    return {"task": task, "answer": answer, "status": "needs_human",
+                            "attempts": attempt, "review": unavailable, "caught": caught,
+                            "planted": planted, "planted_caught": bool(planted and caught)}
+                second_notes = second.get("notes", "").strip()
+                if second.get("verdict") != "pass":
+                    feedback = f"Reviewers disagree. Gemini: {second_notes}"
+                    caught.append(feedback)
+                    _set(run_id, task_id, review_notes=f"Sent back: {feedback}")
+                    continue
+                notes = f"{notes} Gemini agreed: {second_notes}"
             if planted:
                 summary = f"Planted mistake caught: {caught[0]} Fixed and passed."
             elif caught:
                 summary = f"Caught: {caught[-1]} Fixed and passed."
-            else:
+            if (planted or caught) and use_gemini:
+                summary += " Both reviewers passed it."
+            if not (planted or caught):
                 summary = f"Passed: {notes}"
             _set(run_id, task_id, status="done", review_notes=summary)
             return {"task": task, "answer": answer, "status": "done",
@@ -342,23 +381,26 @@ def write_brief(run_id, goal, results, sources):
 
 # ---------- main ----------
 
-def main(goal, challenge=False, fast_reviewer=False):
+def main(goal, challenge=False, fast_reviewer=False, use_gemini=False):
     reviewer_model = FAST if fast_reviewer else REVIEWER_MODEL
     sources = load_sources()
     title = DEFAULT_TITLE if goal == DEFAULT_GOAL else _short_title(goal)
-    tags = [name for name, on in (("Challenge", challenge), ("Haiku reviewer", fast_reviewer)) if on]
+    tags = [name for name, on in (("Challenge", challenge), ("Haiku reviewer", fast_reviewer),
+                                  ("Gemini second review", use_gemini)) if on]
     label = f"{title} \u00b7 {' + '.join(tags)}" if tags else title
     run_id = board.start_run(label, budget_usd=BUDGET_USD)
     dashboard.render(run_id)
+    reviewers = f"{reviewer_model} + {gemini.MODEL}" if use_gemini else reviewer_model
     print(f"Run {run_id} started with {len(sources)} sources and a "
-          f"${BUDGET_USD:.2f} budget. Reviewer: {reviewer_model}. Watch the dashboard.")
+          f"${BUDGET_USD:.2f} budget. Reviewer: {reviewers}. Watch the dashboard.")
     try:
         tasks = coordinator(run_id, goal, sources)
         print(f"Coordinator made {len(tasks)} tasks.")
         results = []
         for n, task in enumerate(tasks):
             r = run_task(run_id, task, sources, plant=challenge and n == 0,
-                         agent=f"worker-{n + 1}", reviewer_model=reviewer_model)
+                         agent=f"worker-{n + 1}", reviewer_model=reviewer_model,
+                         use_gemini=use_gemini)
             print(f"  {r['status']:<12} attempt {r['attempts']}  {task['title']}")
             results.append(r)
         status = "completed" if all(r["status"] == "done" for r in results) else "needs_human"
@@ -384,5 +426,7 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     challenge = "--challenge" in args
     fast_reviewer = "--fast-reviewer" in args
-    args = [a for a in args if a not in ("--challenge", "--fast-reviewer")]
-    main(args[0] if args else DEFAULT_GOAL, challenge=challenge, fast_reviewer=fast_reviewer)
+    use_gemini = "--gemini" in args
+    args = [a for a in args if a not in ("--challenge", "--fast-reviewer", "--gemini")]
+    main(args[0] if args else DEFAULT_GOAL, challenge=challenge, fast_reviewer=fast_reviewer,
+         use_gemini=use_gemini)

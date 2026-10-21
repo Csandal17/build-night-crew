@@ -10,10 +10,12 @@ Plain code does the waiting, so nothing costs money while the inbox is quiet.
 - A failed piece of work is retried once, then left for a human.
 - A daily spending cap stops new runs once today's total can't cover another one.
 
-Run:  uv run watch.py      (stop with Ctrl+C)
+Run:  uv run watch.py            (stop with Ctrl+C)
+      uv run watch.py --gemini   (every claim also gets an independent Gemini review)
 """
 
 import hashlib
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +30,7 @@ INBOX = HERE / "inbox"
 CHECK_SECONDS = 5
 MAX_ATTEMPTS = 2          # first try plus one retry
 DAILY_BUDGET_USD = 1.00   # across every run today, on top of each run's own budget
+USE_GEMINI = False        # set by --gemini
 
 
 def log(message):
@@ -72,7 +75,7 @@ def work_on(event):
     log(f"Waking the crew for {event['source']} (attempt {attempt} of {MAX_ATTEMPTS})")
 
     try:
-        run_id = crew.main(event["goal"])
+        run_id = crew.main(event["goal"], use_gemini=USE_GEMINI)
     except Exception as error:
         retry = attempt < MAX_ATTEMPTS
         board.update_event(event["id"], status="waiting" if retry else "failed",
@@ -93,7 +96,8 @@ def main():
     interrupted_runs = board.close_interrupted_runs()
     recovered = board.recover_events()
     log(f"Always-on crew started. Checking {INBOX.name}/ every {CHECK_SECONDS}s, "
-        f"daily cap ${DAILY_BUDGET_USD:.2f} (${board.spent_today():.4f} spent today).")
+        f"daily cap ${DAILY_BUDGET_USD:.2f} (${board.spent_today():.4f} spent today)."
+        + (" Gemini second review is on." if USE_GEMINI else ""))
     if interrupted_runs:
         log(f"Marked {interrupted_runs} run(s) cut off last time as interrupted.")
     if recovered:
@@ -129,4 +133,5 @@ def main():
 
 
 if __name__ == "__main__":
+    USE_GEMINI = "--gemini" in sys.argv[1:]
     main()

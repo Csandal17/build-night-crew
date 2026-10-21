@@ -6,6 +6,7 @@ Pre-tested starter for Moonfire Build Night (22 Oct 2026): Claude agents with a 
 
 - [uv](https://docs.astral.sh/uv/) (Python 3.12 is installed automatically)
 - Your own Anthropic API key
+- Optional: a Gemini API key (a free Google AI Studio key works) for the second reviewer, and an ElevenLabs API key for spoken briefings
 
 ## Setup
 
@@ -19,12 +20,14 @@ Create a `.env` file in the project folder:
 
 ```
 ANTHROPIC_API_KEY=your-key-here
+GEMINI_API_KEY=optional
+ELEVENLABS_API_KEY=optional
 ```
 
 ## Check your setup
 
 ```bash
-uv run main.py   # one small Claude call, to check your API key works
+uv run check_keys.py   # one tiny call per key: Claude, Gemini (model and JSON format), ElevenLabs (voices)
 ```
 
 ## Run the crew
@@ -33,8 +36,11 @@ uv run main.py   # one small Claude call, to check your API key works
 uv run crew.py               # run the evidence crew on the default goal; writes a brief to output/
 uv run crew.py --challenge   # plant one known mistake to prove the reviewer catches it
 uv run crew.py --challenge --fast-reviewer   # same, with Haiku as the reviewer, to compare cost
+uv run crew.py --gemini      # Gemini gives a second, independent review; a claim passes only if both agree
 uv run dashboard.py          # open the live dashboard (keep it open while the crew runs)
 ```
+
+With `--gemini`, Gemini only reviews work Claude has already passed, and never sees Claude's notes. If it disagrees, the worker revises once; if the reviewers still disagree, the claim is held for a human. If Gemini can't be reached, the claim is marked unverified rather than passed. Gemini calls go through the same budget check and cost tracking as Claude's (`gemini.py`).
 
 For a clean demo, delete `board.db` first so the dashboard starts with no old runs.
 
@@ -61,6 +67,17 @@ echo "Adults should consider taking a daily vitamin D supplement during autumn a
 #    Copy the same file under the same name again and nothing new runs.
 ```
 
+`uv run watch.py --gemini` gives every claim the second review too.
+
+## Brief me
+
+```bash
+uv run brief.py --dry-run   # print the briefing script: free, no audio
+uv run brief.py             # hear what changed since your last briefing (plays on a Mac)
+```
+
+A spoken handover for when you've been away. The script is written by code from `board.db`, not by a model, so it only says what actually happened: what arrived, each verdict, what a reviewer sent back, and what needs your decision. ElevenLabs reads it in two voices, a narrator for the crew and a second voice for the reviewers (falling back to one voice if two-voice dialogue isn't available on your plan). Each briefing stays under 2,000 characters, and audio is saved to `output/`.
+
 ## What's in here
 
 - `llm.py`: the only way agents call Claude. Timeouts, a per-run budget cap, and cost tracking on every call.
@@ -69,5 +86,8 @@ echo "Adults should consider taking a daily vitamin D supplement during autumn a
 - `crew.py`: the example crew. A coordinator splits the goal, workers check each claim against `sources/`, code checks every quote word for word, and a reviewer approves the work or sends it back once.
 - `sources/`: the example source pack (NHS excerpts, checked against the live pages).
 - `watch.py`: always-on mode. Watches `inbox/`, queues new work with a fixed ID, runs the crew one piece at a time, retries once, recovers after a restart, and keeps to a daily spending cap.
+- `gemini.py`: Gemini as a second, independent reviewer, with the same budget check and cost tracking as `llm.py`.
+- `brief.py`: the spoken briefing (ElevenLabs), written by code from the task board.
+- `check_keys.py`: checks every API key with one tiny call each.
 
 The first three files work for any crew. `crew.py` and `sources/` are the example to adapt or swap out.

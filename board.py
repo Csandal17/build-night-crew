@@ -16,6 +16,11 @@ PRICES = {
     "claude-haiku-5-5": (0.10, 0.50),
     "claude-sonnet-5-5": (2.00, 10.00),
     "claude-opus-5-5": (4.00, 20.00),
+    # Gemini, paid-tier list prices (Sept 2026; they double on 1 Jan 2027). A free Google
+    # AI Studio key is charged nothing, so these show what the same calls would cost on
+    # a paid key. Thinking tokens are counted as output, as Google bills them.
+    "gemini-3.8-flash": (0.75, 3.75),
+    "gemini-2.5-flash": (0.30, 2.50),
 }
 
 SCHEMA = """
@@ -61,6 +66,12 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (source, fingerprint)
+);
+CREATE TABLE IF NOT EXISTS briefings (
+    id INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    characters INTEGER NOT NULL,
+    audio_path TEXT
 );
 """
 
@@ -240,6 +251,30 @@ def recover_events():
 
 def recent_events(limit=8):
     return _fetch("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))
+
+
+def events_since(since=None, limit=5):
+    """Events that changed after `since` (oldest first). None means the latest few."""
+    if since is None:
+        rows = _fetch("SELECT * FROM events ORDER BY updated_at DESC, id DESC LIMIT ?", (limit,))
+    else:
+        rows = _fetch("SELECT * FROM events WHERE updated_at > ? "
+                      "ORDER BY updated_at DESC, id DESC LIMIT ?", (since, limit))
+    return list(reversed(rows))
+
+
+# ---------- briefings: the spoken handovers made by brief.py ----------
+
+def last_briefing():
+    rows = _fetch("SELECT * FROM briefings ORDER BY id DESC LIMIT 1")
+    return rows[0] if rows else None
+
+
+def add_briefing(characters, audio_path=None):
+    return _execute(
+        "INSERT INTO briefings (created_at, characters, audio_path) VALUES (?, ?, ?)",
+        (_now(), characters, audio_path),
+    )
 
 
 if __name__ == "__main__":
