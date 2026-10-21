@@ -21,6 +21,12 @@ PRICES = {
     # a paid key. Thinking tokens are counted as output, as Google bills them.
     "gemini-3.8-flash": (0.75, 3.75),
     "gemini-2.5-flash": (0.30, 2.50),
+    # Coding agents run through the Sparkles CLI use your own Claude Code (or Codex/OpenCode)
+    # plan, and Sparkles' result doesn't report tokens. So they're recorded with 0 tokens
+    # and $0 here: not free, just not visible to this board.
+    "sparkles-claude": (0.0, 0.0),
+    "sparkles-codex": (0.0, 0.0),
+    "sparkles-opencode": (0.0, 0.0),
 }
 
 SCHEMA = """

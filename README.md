@@ -84,6 +84,17 @@ uv run brief.py --detail    # one line per claim with its reason, instead of gro
 
 A spoken handover for when you've been away. The script is written by code from `board.db`, not by a model, so it only says what actually happened: what arrived, each verdict, what a reviewer sent back, and what needs your decision. ElevenLabs reads it in two voices, a narrator for the crew and a second voice for the reviewers (falling back to one voice if two-voice dialogue isn't available on your plan). Each briefing stays under 2,000 characters, and audio is saved to `output/`.
 
+## Sparkles writes the code, the crew checks it (experimental)
+
+```bash
+uv run sparkles_demo.py ~/sparkles-test "Add a function greet(name) to hello.py that returns 'Hello, <name>!'"
+uv run sparkles_demo.py ~/sparkles-test "..." --gemini   # Gemini reviews the change too
+```
+
+A [Sparkles](https://sparkles.dev) coding agent makes the change through the Sparkles CLI (`sparkles exec`, driving your local Claude Code). Code checks something actually changed, Claude reviews the real diff (not the agent's description of it), and a reviewer's feedback goes back to Sparkles for one revision. Then it's done or held for a human. Nothing is committed or pushed.
+
+Safety: the agent gets at most 6 turns and 5 minutes, may edit files but not run commands without approval, runs local-only, never sees the crew's API keys, and refuses to run in a folder that contains a `.env` file. Needs the Sparkles CLI (on your PATH, at `~/sparkles-cli/sparkles`, or set `SPARKLES_BIN`). The Sparkles agent runs on your own Claude Code plan, so its cost isn't shown on the dashboard.
+
 ## What's in here
 
 - `llm.py`: the only way agents call Claude. Timeouts, a per-run budget cap, and cost tracking on every call.
@@ -95,5 +106,7 @@ A spoken handover for when you've been away. The script is written by code from 
 - `gemini.py`: Gemini as a second, independent reviewer, with the same budget check and cost tracking as `llm.py`.
 - `brief.py`: the spoken briefing (ElevenLabs), written by code from the task board.
 - `check_keys.py`: checks every API key with one tiny call each.
+- `sparkles_agent.py`: a crew worker that writes code through the Sparkles CLI, with limits, no secrets, and the real change read from git.
+- `sparkles_demo.py`: one request from start to finish: Sparkles codes, the crew reviews, one revision, then done or a human.
 
 The first three files work for any crew. `crew.py` and `sources/` are the example to adapt or swap out.
