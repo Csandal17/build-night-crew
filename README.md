@@ -2,6 +2,11 @@
 
 Pre-tested starter for Moonfire Build Night (22 Oct 2026): Claude agents with a shared task board, a per-run budget cap and live cost tracking. Work in progress.
 
+On top of that base:
+- **Always-on mode:** the crew waits for work in an inbox, wakes only when something arrives, recovers after a restart, and keeps to a daily spending cap.
+- **An independent second reviewer:** Gemini re-checks every claim Claude passes, and a claim only counts if both agree.
+- **Brief me:** a spoken handover of what the crew did while you were away, written by code from the task board and read by ElevenLabs in two voices.
+
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/) (Python 3.12 is installed automatically)
