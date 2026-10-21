@@ -23,7 +23,14 @@ import llm
 load_dotenv()
 
 MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+# Used only when MODEL is overloaded (Google's 503 "high demand") after the retries below.
+FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+RETRY_WAITS = (5, 15)  # seconds to wait before each retry while Google is busy
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+
+class GeminiBusy(RuntimeError):
+    """Google kept saying the model is overloaded or rate-limited."""
 
 
 def _api_key():
@@ -41,28 +48,43 @@ def _thinking(model):
     return {"thinkingLevel": "low"}
 
 
+def _message(response):
+    try:
+        return response.json()["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        return response.text[:300]
+
+
 def _post(model, body):
-    """Send one request. Retries once after a short wait if Google is busy or rate-limits
-    (the free tier allows roughly 10 requests a minute)."""
+    """Send one request. While Google is busy or rate-limiting (the free tier allows
+    roughly 10 requests a minute), wait and retry: after 5 seconds, then 15."""
     url = API_URL.format(model=model)
     headers = {"x-goog-api-key": _api_key(), "Content-Type": "application/json"}
-    for attempt in (1, 2):
+    for wait in (*RETRY_WAITS, None):
         response = httpx.post(url, headers=headers, json=body, timeout=90.0)
-        if response.status_code in (429, 500, 503) and attempt == 1:
-            time.sleep(8)
-            continue
-        if response.status_code != 200:
-            try:
-                message = response.json()["error"]["message"]
-            except (ValueError, KeyError):
-                message = response.text[:300]
-            raise RuntimeError(f"Gemini returned {response.status_code}: {message}")
-        return response.json()
+        if response.status_code == 200:
+            return response.json()
+        if response.status_code not in (429, 500, 503):
+            raise RuntimeError(f"Gemini returned {response.status_code}: {_message(response)}")
+        if wait is None:
+            raise GeminiBusy(f"Gemini returned {response.status_code}: {_message(response)}")
+        time.sleep(wait)
 
 
 def ask_json(run_id, agent, prompt, schema, *, system=None, model=MODEL,
              max_tokens=2000, task_id=None):
-    """Ask Gemini once on behalf of an agent and return its answer as a dict."""
+    """Ask Gemini once on behalf of an agent and return its answer as a dict.
+    If the model stays overloaded through the retries, ask the fallback model instead."""
+    try:
+        return _ask_json(run_id, agent, prompt, schema, system, model, max_tokens, task_id)
+    except GeminiBusy as busy:
+        if not FALLBACK_MODEL or FALLBACK_MODEL == model:
+            raise
+        print(f"  {model} is busy ({busy}). Asking {FALLBACK_MODEL} instead.")
+        return _ask_json(run_id, agent, prompt, schema, system, FALLBACK_MODEL, max_tokens, task_id)
+
+
+def _ask_json(run_id, agent, prompt, schema, system, model, max_tokens, task_id):
     budget = llm._budget(run_id)
     spent = board.run_cost(run_id)
     in_chars = len(prompt) + len(system or "") + len(json.dumps(schema))

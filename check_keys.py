@@ -64,10 +64,12 @@ def check_gemini():
     parts = data["candidates"][0]["content"]["parts"]
     text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
     usage = data.get("usageMetadata", {})
+    fallback = (f"fallback {gemini.FALLBACK_MODEL} available" if gemini.FALLBACK_MODEL in names
+                else f"fallback {gemini.FALLBACK_MODEL} NOT available, so no backup if Google is busy")
     report("Gemini", True, f"{gemini.MODEL} answered {text.strip()} in JSON "
                            f"({usage.get('promptTokenCount', 0)} tokens in, "
                            f"{usage.get('candidatesTokenCount', 0)} out, "
-                           f"{usage.get('thoughtsTokenCount', 0)} thinking)")
+                           f"{usage.get('thoughtsTokenCount', 0)} thinking); {fallback}")
 
 
 def check_elevenlabs():
