@@ -17,7 +17,9 @@ import board
 OUT_PATH = Path(__file__).parent / "dashboard.html"
 DATA_PATH = Path(__file__).parent / "dashboard_data.js"
 REFRESH_SECONDS = 3
-LONG_GOAL_CHARS = 80  # longer goals get a smaller headline clamped to 3 lines
+LEDE = ("A coordinator splits the goal, workers do the tasks, and a reviewer "
+        "checks every one before it counts.")
+LONG_GOAL_CHARS = 80  # longer titles get a smaller headline clamped to 3 lines
 
 STATUS_COLOURS = {
     "done": "#7FB77E",
@@ -45,16 +47,35 @@ body { margin: 0; background: var(--page); color: var(--ink);
   font-size: 18px; line-height: 1.6; }
 h1, h2, h3, .num, .label { font-family: 'Bricolage Grotesque', 'Avenir Next', 'Segoe UI', sans-serif; }
 .wrap { max-width: 1040px; margin: 0 auto; padding: 0 clamp(16px, 5vw, 48px); }
-.hero { background: var(--navy); color: var(--hero-text); padding: 48px 0 56px; }
-.eyebrow { color: #B9C6DA; font-size: 16px; margin: 0 0 8px; }
-.hero h1 { font-size: clamp(28px, 4vw, 40px); font-weight: 700; margin: 0 0 32px; line-height: 1.2; }
-.hero h1.long { font-size: clamp(20px, 2.6vw, 26px); display: -webkit-box; -webkit-box-orient: vertical;
+.hero { background: var(--navy); color: var(--hero-text); padding: clamp(40px, 6vw, 72px) 0 clamp(48px, 7vw, 88px); }
+.hero-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  gap: clamp(32px, 5vw, 64px); align-items: center; }
+@media (max-width: 860px) { .hero-grid { grid-template-columns: 1fr; } }
+.eyebrow { color: #B9C6DA; font-size: 16px; margin: 0 0 12px; }
+.hero h1 { font-size: clamp(32px, 4.6vw, 52px); font-weight: 800; margin: 0 0 16px;
+  line-height: 1.02; letter-spacing: -0.02em; }
+.hero h1.long { font-size: clamp(24px, 3vw, 32px); display: -webkit-box; -webkit-box-orient: vertical;
   -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
-.big { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
-.big .num { font-size: clamp(64px, 12vw, 120px); font-weight: 800; line-height: 1; letter-spacing: -0.02em; }
-.big .of { font-size: 20px; color: #DCE4EF; }
-.budget { margin-top: 24px; height: 14px; background: #2E3A52; border-radius: 8px; overflow: hidden; }
+.lede { color: #DCE4EF; font-size: clamp(17px, 1.8vw, 19px); margin: 0 0 20px; max-width: 30em; }
+.tags { display: flex; flex-wrap: wrap; gap: 10px; }
+.tag { display: inline-flex; align-items: center; min-height: 36px; padding: 0 16px; border: 1px solid #5A6F96;
+  border-radius: 22px; color: #F4F7FB; font-size: 15px; }
+.receipt { justify-self: center; width: 100%; max-width: 440px; background: var(--card); color: var(--ink);
+  border-radius: 6px; padding: 26px 28px 22px; transform: rotate(-1.5deg);
+  box-shadow: 0 24px 48px rgba(5, 12, 30, 0.45); }
+.receipt .head { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 4px 16px; }
+.receipt .head b { font-family: 'Bricolage Grotesque', sans-serif; font-size: 20px; }
+.receipt .head span, .receipt .small { font-size: 15px; color: #45526B; }
+.receipt hr { border: 0; border-top: 2px dashed #C5D1DE; margin: 16px 0 14px; }
+.receipt .spent { font-family: 'Bricolage Grotesque', sans-serif; font-weight: 800; letter-spacing: -0.02em;
+  font-size: clamp(40px, 5vw, 56px); line-height: 1; margin: 6px 0 12px; display: block; }
+.budget { height: 10px; background: var(--track); border-radius: 8px; overflow: hidden; margin-bottom: 8px; }
 .budget span { display: block; height: 100%; background: var(--sun); border-radius: 8px; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.stats b { font-family: 'Bricolage Grotesque', sans-serif; font-size: clamp(22px, 3vw, 28px); line-height: 1.1; display: block; }
+.stats span { display: block; font-size: 14px; line-height: 1.35; color: #45526B; margin-top: 4px; }
+.receipt .foot { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px 16px; font-size: 15px; }
+.receipt .foot strong { font-weight: 600; }
 .pill { display: inline-block; font-family: 'Bricolage Grotesque', sans-serif; font-size: 14px;
   font-weight: 700; padding: 2px 12px; border-radius: 22px; color: var(--ink); }
 section { padding: 48px 0 0; }
@@ -97,6 +118,18 @@ def _clip(text, limit):
     if len(text) <= limit:
         return text
     return text[:limit].rsplit(" ", 1)[0].rstrip(",.:;") + "\u2026"
+
+
+def _cents(value):
+    """Friendly receipt wording: 4.2¢ for small amounts, $1.50 for larger ones."""
+    return f"{value * 100:.1f}\u00a2" if value < 1 else f"${value:.2f}"
+
+
+def _local_time(iso):
+    try:
+        return datetime.fromisoformat(iso).astimezone().strftime("%a %d %b, %H:%M")
+    except (TypeError, ValueError):
+        return ""
 
 
 def _pill(status):
@@ -182,15 +215,41 @@ def _body(run_id=None):
         for r in reversed(runs[-8:])
     )
 
-    goal = run["goal"]
-    long_goal = len(goal) > LONG_GOAL_CHARS
-    return f"""<div class="hero"><div class="wrap">
-  <p class="eyebrow">Run {run['id']} · {_pill(run['status'])}</p>
-  <h1{f' class="long" title="{escape(goal)}"' if long_goal else ''}>{escape(goal)}</h1>
-  <div class="big"><span class="num">{_money(total)}</span>
-    <span class="of">of {f"${budget:.2f}" if budget >= 0.01 else _money(budget)} budget · {used_pct:.0f}% used</span></div>
-  <div class="budget"><span style="width:{used_pct:.1f}%"></span></div>
-</div></div>
+    title, _, tag_text = run["goal"].partition(" \u00b7 ")
+    tags_html = "".join(f'<span class="tag">{escape(t)}</span>' for t in tag_text.split(" + ") if t)
+    tasks = s["tasks"]
+    passed = sum(t["status"] == "done" for t in tasks)
+    fixed = sum(t["status"] == "done" and t["attempts"] > 1 for t in tasks)
+    held = sum(t["status"] == "needs_human" for t in tasks)
+    calls = board._fetch("SELECT COUNT(*) AS n FROM calls WHERE run_id = ?", (run_id,))[0]["n"]
+    budget_text = f"${budget:.2f}" if budget >= 0.01 else _money(budget)
+    long_title = len(title) > LONG_GOAL_CHARS
+
+    return f"""<div class="hero"><div class="wrap"><div class="hero-grid">
+  <div>
+    <p class="eyebrow">Run {run['id']} · {_pill(run['status'])}</p>
+    <h1{f' class="long" title="{escape(title)}"' if long_title else ''}>{escape(title)}</h1>
+    <p class="lede">{escape(LEDE)}</p>
+    <div class="tags">{tags_html}</div>
+  </div>
+  <div class="receipt">
+    <div class="head"><b>Run receipt</b><span>{_local_time(run['started_at'])}</span></div>
+    <hr>
+    <span class="small">Spent so far</span>
+    <span class="spent">{_money(total)}</span>
+    <div class="budget"><span style="width:{used_pct:.1f}%"></span></div>
+    <span class="small">of a {budget_text} budget \u00b7 {used_pct:.0f}% used</span>
+    <hr>
+    <div class="stats">
+      <div><b>{passed}/{len(tasks)}</b><span>Passed review</span></div>
+      <div><b>{fixed}</b><span>Caught and fixed</span></div>
+      <div><b>{held}</b><span>Held for a human</span></div>
+    </div>
+    <hr>
+    <div class="foot"><span class="small">{calls} model calls</span>
+      <strong>{passed} of {len(tasks)} passed for {_cents(total)}</strong></div>
+  </div>
+</div></div></div>
 <div class="wrap">
   {inbox_html}
   <section><h2>Cost by agent</h2>{agents_html}</section>
@@ -220,10 +279,10 @@ def render(run_id=None):
   #live.down .dot {{ background: #E98A4E; }}
   @keyframes pulse {{ 0% {{ box-shadow: 0 0 0 0 rgba(127, 183, 126, 0.7); }}
     100% {{ box-shadow: 0 0 0 10px rgba(127, 183, 126, 0); }} }}
-  .changed .big .num {{ animation: glow 1.4s ease-out; }}
-  @keyframes glow {{ 0% {{ color: #F2B33D; }} 100% {{ color: #F4F7FB; }} }}
+  .changed .spent {{ animation: glow 1.4s ease-out; }}
+  @keyframes glow {{ 0% {{ color: #F2B33D; }} 100% {{ color: #14213D; }} }}
   @media (prefers-reduced-motion: reduce) {{
-    #live.ok .dot, .changed .big .num {{ animation: none; }} }}
+    #live.ok .dot, .changed .spent {{ animation: none; }} }}
 </style>
 </head><body>
 <div id="app">{body}</div>
@@ -234,7 +293,7 @@ def render(run_id=None):
   var app = document.getElementById("app");
   var badge = document.getElementById("live");
   var badgeText = document.getElementById("live-text");
-  var current = null;
+  var current = {json.dumps(body).replace("</", "<\\/")};  // what's on screen now
   var lastOk = Date.now();
   var failing = false;
 
