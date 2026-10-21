@@ -49,6 +49,19 @@ CREATE TABLE IF NOT EXISTS calls (
     cost_usd REAL NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY,
+    source TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    goal TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'waiting',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    run_id INTEGER REFERENCES runs(id),
+    error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (source, fingerprint)
+);
 """
 
 TASK_FIELDS = {"owner", "status", "result", "review_notes", "attempts"}
@@ -160,6 +173,73 @@ def all_runs():
            FROM runs LEFT JOIN calls ON calls.run_id = runs.id
            GROUP BY runs.id ORDER BY runs.id"""
     )
+
+
+def spent_today():
+    """Total spent on model calls since midnight (local time), across every run."""
+    midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    since = midnight.astimezone(timezone.utc).isoformat(timespec="seconds")
+    rows = _fetch(
+        "SELECT COALESCE(SUM(cost_usd), 0) AS total FROM calls WHERE created_at >= ?",
+        (since,),
+    )
+    return rows[0]["total"]
+
+
+def close_interrupted_runs():
+    """Runs still marked 'running' when the watcher starts were cut off part way. Say so."""
+    stuck = _fetch("SELECT id FROM runs WHERE status = 'running'")
+    for row in stuck:
+        finish_run(row["id"], status="interrupted")
+    return len(stuck)
+
+
+# ---------- events: work waiting for the always-on crew ----------
+
+EVENT_FIELDS = {"status", "attempts", "run_id", "error"}
+
+
+def add_event(source, fingerprint, goal):
+    """Queue a piece of work. Returns its id, or None if this exact version
+    of this file was queued before, so a duplicate never runs twice."""
+    conn = _connect()
+    try:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO events (source, fingerprint, goal, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (source, fingerprint, goal, _now(), _now()),
+        )
+        conn.commit()
+        return cur.lastrowid if cur.rowcount else None
+    finally:
+        conn.close()
+
+
+def update_event(event_id, **fields):
+    unknown = set(fields) - EVENT_FIELDS
+    if unknown:
+        raise ValueError(f"Unknown event fields: {unknown}")
+    fields["updated_at"] = _now()
+    assignments = ", ".join(f"{name} = ?" for name in fields)
+    _execute(f"UPDATE events SET {assignments} WHERE id = ?", (*fields.values(), event_id))
+
+
+def next_event():
+    """The oldest piece of work still waiting, or None if the inbox is clear."""
+    rows = _fetch("SELECT * FROM events WHERE status = 'waiting' ORDER BY id LIMIT 1")
+    return rows[0] if rows else None
+
+
+def recover_events():
+    """After a restart, anything left 'running' was interrupted. Put it back in the queue."""
+    stuck = _fetch("SELECT id FROM events WHERE status = 'running'")
+    for row in stuck:
+        update_event(row["id"], status="waiting")
+    return len(stuck)
+
+
+def recent_events(limit=8):
+    return _fetch("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))
 
 
 if __name__ == "__main__":

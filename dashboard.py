@@ -24,6 +24,8 @@ STATUS_COLOURS = {
     "completed": "#7FB77E",
     "running": "#F2B33D",
     "queued": "#C5D1DE",
+    "waiting": "#C5D1DE",
+    "interrupted": "#E98A4E",
     "waiting_review": "#F2B33D",
     "revising": "#F2B33D",
     "needs_human": "#E98A4E",
@@ -73,6 +75,12 @@ h2 { font-size: 32px; font-weight: 800; margin: 0 0 24px; }
 .run { background: var(--card); border-radius: 8px; padding: 16px 18px; }
 .run.current { outline: 3px solid var(--sun); }
 .run .num { font-size: 32px; font-weight: 800; display: block; }
+.watcher { font-family: 'Bricolage Grotesque', sans-serif; font-weight: 700; color: var(--muted); margin: -12px 0 20px; }
+.inbox { display: grid; gap: 12px; }
+.event { background: var(--card); border-radius: 8px; padding: 14px 18px;
+  display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: center; }
+.event .label { font-weight: 700; }
+.event p { grid-column: 1 / -1; margin: 0; color: var(--text); font-size: 16px; }
 footer { margin-top: 64px; background: var(--navy); color: #DCE4EF; padding: 24px 0; font-size: 15px; }
 """
 
@@ -104,11 +112,39 @@ def _task_costs(run_id):
     return {row["task_id"]: row["cost"] for row in rows}
 
 
+def _inbox_html():
+    """The always-on inbox (watch.py). Empty when the watcher has never been used."""
+    events = board.recent_events()
+    if not events:
+        return ""
+    running = [e for e in events if e["status"] == "running"]
+    waiting = sum(1 for e in events if e["status"] == "waiting")
+    if running:
+        state = f"Working on {running[0]['source']}"
+    elif waiting:
+        state = f"{waiting} waiting"
+    else:
+        state = "Waiting for work"
+    state += f" · {_money(board.spent_today())} spent today"
+    cards = "".join(
+        f"""<div class="event">
+          <span class="label">{escape(e['source'])}</span>{_pill(e['status'])}
+          <p class="meta">attempts {e['attempts']}{f" · run {e['run_id']}" if e['run_id'] else ''}</p>
+          <p>{escape(_clip(e['goal'], 200))}</p>
+          {f"<p class='meta'>Error: {escape(_clip(e['error'], 200))}</p>" if e['error'] else ''}
+        </div>"""
+        for e in events
+    )
+    return f"""<section><h2>Inbox</h2><p class="watcher">{escape(state)}</p>
+  <div class="inbox">{cards}</div></section>"""
+
+
 def _body(run_id=None):
     """Build the page content (everything inside the body) for one run."""
     runs = board.all_runs()
+    inbox_html = _inbox_html()
     if not runs:
-        return "<div class='wrap'><p>No runs yet.</p></div>"
+        return f"<div class='wrap'>{inbox_html}<section><p>No runs yet.</p></section></div>"
     run_id = run_id or runs[-1]["id"]
     s = board.summary(run_id)
     run, total = s["run"], s["total_usd"]
@@ -156,6 +192,7 @@ def _body(run_id=None):
   <div class="budget"><span style="width:{used_pct:.1f}%"></span></div>
 </div></div>
 <div class="wrap">
+  {inbox_html}
   <section><h2>Cost by agent</h2>{agents_html}</section>
   <section><h2>Task board</h2><div class="tasks">{tasks_html}</div></section>
   <section><h2>Every run</h2><div class="runs">{runs_html}</div></section>

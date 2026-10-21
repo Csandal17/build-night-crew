@@ -377,6 +377,7 @@ def main(goal, challenge=False, fast_reviewer=False):
     finally:
         dashboard.render(run_id)
         print(f"Total cost: {dashboard._money(board.run_cost(run_id))}")
+    return run_id  # watch.py uses this to link each piece of inbox work to its run
 
 
 if __name__ == "__main__":
