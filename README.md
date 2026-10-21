@@ -74,6 +74,7 @@ echo "Adults should consider taking a daily vitamin D supplement during autumn a
 ```bash
 uv run brief.py --dry-run   # print the briefing script: free, no audio
 uv run brief.py             # hear what changed since your last briefing (plays on a Mac)
+uv run brief.py --detail    # one line per claim with its reason, instead of grouped by verdict
 ```
 
 A spoken handover for when you've been away. The script is written by code from `board.db`, not by a model, so it only says what actually happened: what arrived, each verdict, what a reviewer sent back, and what needs your decision. ElevenLabs reads it in two voices, a narrator for the crew and a second voice for the reviewers (falling back to one voice if two-voice dialogue isn't available on your plan). Each briefing stays under 2,000 characters, and audio is saved to `output/`.

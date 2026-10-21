@@ -8,6 +8,7 @@ for the crew, and a second voice for the reviewers.
 Run:  uv run brief.py             (everything since your last briefing; plays on a Mac)
       uv run brief.py --dry-run   (print the script only: free, no audio, nothing saved)
       uv run brief.py --all       (the latest few pieces of work, even if already briefed)
+      uv run brief.py --detail    (one line per claim with its reason, instead of grouped by verdict)
       uv run brief.py --no-play   (save the audio without playing it)
 
 Needs ELEVENLABS_API_KEY in .env. ElevenLabs charges by the character, and the script
@@ -97,49 +98,77 @@ def _clock(iso):
 
 # ---------- the script, written by code from the board ----------
 
-def _event_lines(event, tally):
-    """What to say about one piece of work. Returns (lines, needs_you).
-    The reviewer's voice only speaks when something happened worth hearing;
-    routine passes are added to `tally` and summed up once at the end."""
+VERDICT_ORDER = ("supported", "contradicted", "inconclusive")
+
+
+def _lower_first(text):
+    """Lower-case the first letter mid-sentence, but leave acronyms like UK alone."""
+    first = text.split(" ", 1)[0]
+    if len(first) > 1 and first.isupper():
+        return text
+    return text[:1].lower() + text[1:]
+
+
+def _event_items(event, tally):
+    """What happened to one piece of work.
+    Returns (claims, notes, needs_you): claims are (label, verdict, summary) for each
+    claim that passed review; notes are lines worth saying on their own (something sent
+    back, something that needs you, work that failed or is still queued)."""
     name = _name(event["source"])
     if event["status"] == "failed":
-        return [("narrator", f"{name} could not be run. {_sentence(event['error'])}")], True
+        return [], [("narrator", f"{name} could not be run. {_sentence(event['error'])}")], True
     if event["status"] == "running":
-        return [("narrator", f"{name} is being checked right now.")], False
+        return [], [("narrator", f"{name} is being checked right now.")], False
     if event["status"] == "waiting":
-        return [("narrator", f"{name} is waiting in the queue.")], False
+        return [], [("narrator", f"{name} is waiting in the queue.")], False
     if not event["run_id"]:
-        return [], False
+        return [], [], False
 
     s = board.summary(event["run_id"])
     if s["run"]["status"] == "stopped_budget":
-        return [("narrator", f"{name} stopped at its budget cap before finishing.")], True
+        return [], [("narrator", f"{name} stopped at its budget cap before finishing.")], True
 
-    lines, needs_you = [], False
+    claims, notes, needs_you = [], [], False
     several = len(s["tasks"]) > 1
     for task in s["tasks"]:
-        label = f"{name}, {_topic(task['title'])}" if several else name
+        label = _topic(task["title"]) if several else name
         head, _, summary = (task["result"] or "").partition(": ")
         verdict = head.replace("PLANTED MISTAKE, ", "").strip().lower() or "no verdict"
-        notes = task["review_notes"] or ""
+        review = task["review_notes"] or ""
         if task["status"] == "done":
             tally["passed"] += 1
-            if "Gemini agreed" in notes or "Both reviewers passed" in notes:
+            if "Gemini agreed" in review or "Both reviewers passed" in review:
                 tally["both"] += 1
-            lines.append(("narrator", f"{label}: {verdict}. {_sentence(summary)}".strip()))
-            if notes.startswith(("Caught:", "Planted mistake caught:")):
-                caught = notes.split(": ", 1)[1]
+            claims.append((label, verdict, summary))
+            if review.startswith(("Caught:", "Planted mistake caught:")):
+                caught = review.split(": ", 1)[1]
                 for ending in (" Both reviewers passed it.", " Fixed and passed."):
                     caught = caught.replace(ending, "")
-                lines.append(("reviewer", f"I sent this one back first. {_sentence(caught, 140)} "
-                                          "It was fixed, and then it passed."))
+                notes.append(("reviewer", f"I sent {_lower_first(label)} back first. "
+                                          f"{_sentence(caught, 140)} It was fixed, and then it passed."))
         else:
             needs_you = True
-            reason = notes.split(": ", 1)[-1] if notes else "The reviewers could not pass it."
-            lines.append(("reviewer", f"I couldn't sign off {label[:1].lower() + label[1:]}. "
-                                      f"{_sentence(reason, 140)} "
-                                      "It needs your decision."))
-    return lines, needs_you
+            reason = review.split(": ", 1)[-1] if review else "The reviewers could not pass it."
+            notes.append(("reviewer", f"I couldn't sign off {_lower_first(label)}. "
+                                      f"{_sentence(reason, 140)} It needs your decision."))
+    return claims, notes, needs_you
+
+
+def _claim_lines(claims, detail):
+    """Detail: one line per claim, with its reason. Otherwise: one line per verdict,
+    listing the claims and giving the reason once, so repeats don't drone on."""
+    if detail:
+        return [("narrator", f"{label}: {verdict}. {_sentence(summary)}".strip())
+                for label, verdict, summary in claims]
+    lines = []
+    verdicts = [v for v in VERDICT_ORDER if any(c[1] == v for c in claims)]
+    verdicts += sorted({c[1] for c in claims} - set(verdicts))
+    for verdict in verdicts:
+        group = [c for c in claims if c[1] == verdict]
+        names = _list([label if n == 0 else _lower_first(label) for n, (label, _, _) in enumerate(group)])
+        reason = _sentence(group[0][2])
+        lines.append(("narrator", f"{verdict.capitalize()}: {names}. {reason}".strip()))
+    return lines
 
 
 def _review_summary(tally):
@@ -155,7 +184,39 @@ def _review_summary(tally):
     return "I passed it." if passed == 1 else f"I passed all {passed} verdicts."
 
 
-def build_script(show_all=False):
+def _compose(events, since, counts, detail):
+    """The whole script for these events, as a list of (speaker, text)."""
+    changed = sum(counts.values())
+    labels = (("done", "finished"), ("running", "in progress"),
+              ("waiting", "waiting"), ("failed", "could not run"))
+    parts = [f"{counts[k]} {label}" for k, label in labels if counts.get(k)]
+    opener = f"Here's your crew briefing. Since {_clock(since)}, " if since else "Here's your crew briefing. "
+    work = _count(changed, "piece of work", "pieces of work")
+    opener += f"{work} finished." if counts.get("done") == changed else f"{work} changed: {_list(parts)}."
+
+    claims, notes, needs_you = [], [], []
+    tally = {"passed": 0, "both": 0}
+    for event in events:
+        event_claims, event_notes, needs = _event_items(event, tally)
+        claims += event_claims
+        notes += event_notes
+        if needs:
+            needs_you.append(_name(event["source"]).lower())
+
+    lines = [("narrator", opener)] + _claim_lines(claims, detail) + notes
+    summary = _review_summary(tally)
+    if summary:
+        lines.append(("reviewer", summary))
+    if changed > len(events):
+        lines.append(("narrator", f"There's {_count(changed - len(events), 'more item', 'more items')} "
+                                  "on the dashboard."))
+    lines.append(("narrator", f"Spent today: {_cents(board.spent_today())}." + (
+        f" {_count(len(needs_you), 'item needs', 'items need')} your decision: {_list(needs_you)}."
+        if needs_you else " Nothing needs your decision.")))
+    return lines
+
+
+def build_script(show_all=False, detail=False):
     """Returns (lines, since) where lines is a list of (speaker, text)."""
     last = None if show_all else board.last_briefing()
     since = last["created_at"] if last else None
@@ -168,46 +229,11 @@ def build_script(show_all=False):
         (since,) if since else (),
     )
     counts = {row["status"]: row["n"] for row in rows}
-    changed = sum(counts.values())
-    labels = (("done", "finished"), ("running", "in progress"),
-              ("waiting", "waiting"), ("failed", "could not run"))
-    parts = [f"{counts[k]} {label}" for k, label in labels if counts.get(k)]
-    opener = f"Here's your crew briefing. Since {_clock(since)}, " if since else "Here's your crew briefing. "
-    work = _count(changed, "piece of work", "pieces of work")
-    if counts.get("done") == changed:
-        opener += f"{work} finished." if changed > 1 else "1 piece of work finished."
-    else:
-        opener += f"{work} changed: {_list(parts)}."
-    closing_start = f"Spent today: {_cents(board.spent_today())}."
-
-    lines = [("narrator", opener)]
-    needs_you = []
-    tally = {"passed": 0, "both": 0}
-    used = len(opener) + len(closing_start) + 220  # room for the review summary and closing
-    told = 0
-    for event in events:
-        event_tally = {"passed": 0, "both": 0}
-        block, needs = _event_lines(event, event_tally)
-        size = sum(len(text) for _, text in block)
-        if used + size > MAX_CHARS:
+    # Keep under ElevenLabs' limit: if it's too long, leave the oldest work for the dashboard.
+    for keep in range(len(events), 0, -1):
+        lines = _compose(events[-keep:], since, counts, detail)
+        if sum(len(text) for _, text in lines) <= MAX_CHARS:
             break
-        lines += block
-        used += size
-        told += 1
-        for key in tally:
-            tally[key] += event_tally[key]
-        if needs:
-            needs_you.append(_name(event["source"]).lower())
-    summary = _review_summary(tally)
-    if summary:
-        lines.append(("reviewer", summary))
-    if changed > told:
-        lines.append(("narrator", f"There's {_count(changed - told, 'more item', 'more items')} on the dashboard."))
-
-    closing = closing_start + (
-        f" {_count(len(needs_you), 'item needs', 'items need')} your decision: {_list(needs_you)}."
-        if needs_you else " Nothing needs your decision.")
-    lines.append(("narrator", closing))
     return lines, since
 
 
@@ -246,7 +272,7 @@ def speak(lines, path):
 
 
 def main(args):
-    lines, since = build_script(show_all="--all" in args)
+    lines, since = build_script(show_all="--all" in args, detail="--detail" in args)
     if not lines:
         when = f" at {_clock(since)}" if since else ""
         print(f"Nothing new since your last briefing{when}. Use --all to hear the latest anyway.")
