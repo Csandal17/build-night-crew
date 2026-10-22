@@ -19,6 +19,8 @@ DATA_PATH = Path(__file__).parent / "dashboard_data.js"
 REFRESH_SECONDS = 3
 LEDE = ("A coordinator splits the goal, workers do the tasks, and a reviewer "
         "checks every one before it counts.")
+INCIDENT_LEDE = ("A production alert woke the crew. A fixer writes the fix, a tester runs tests "
+                 "the fixer never saw, and reviewers check it. Nothing is merged without an engineer.")
 LONG_GOAL_CHARS = 80  # longer titles get a smaller headline clamped to 3 lines
 
 STATUS_COLOURS = {
@@ -145,6 +147,20 @@ def _task_costs(run_id):
     return {row["task_id"]: row["cost"] for row in rows}
 
 
+def _goal_text(goal):
+    """A .json alert in the inbox is shown by its title and message, not as raw JSON."""
+    if not goal.startswith("{"):
+        return goal
+    try:
+        alert = json.loads(goal)
+    except ValueError:
+        return goal
+    event = alert.get("data", {}).get("event") if isinstance(alert.get("data"), dict) else None
+    alert = event if isinstance(event, dict) else alert
+    return " \u00b7 ".join(str(x) for x in ("Alert: " + str(alert.get("title", "production error")),
+                                             alert.get("message")) if x)
+
+
 def _inbox_html():
     """The always-on inbox (watch.py). Empty when the watcher has never been used."""
     events = board.recent_events()
@@ -163,7 +179,7 @@ def _inbox_html():
         f"""<div class="event">
           <span class="label">{escape(e['source'])}</span>{_pill(e['status'])}
           <p class="meta">attempts {e['attempts']}{f" · run {e['run_id']}" if e['run_id'] else ''}</p>
-          <p>{escape(_clip(e['goal'], 200))}</p>
+          <p>{escape(_clip(_goal_text(e['goal']), 200))}</p>
           {f"<p class='meta'>Error: {escape(_clip(e['error'], 200))}</p>" if e['error'] else ''}
         </div>"""
         for e in events
@@ -238,7 +254,7 @@ def _body(run_id=None):
   <div>
     <p class="eyebrow">Run {run['id']} · {_pill(run['status'])}</p>
     <h1{f' class="long" title="{escape(title)}"' if long_title else ''}>{escape(title)}</h1>
-    <p class="lede">{escape(LEDE)}</p>
+    <p class="lede">{escape(INCIDENT_LEDE if title.startswith("Incident:") else LEDE)}</p>
     <div class="tags">{tags_html}</div>
   </div>
   <div class="receipt">

@@ -160,6 +160,9 @@ def _item_lines(item, tally):
     if s["run"]["status"] == "stopped_budget":
         return [], [("narrator", f"{name} stopped at its budget cap before finishing.")], True
 
+    if s["run"]["goal"].startswith("Incident:"):
+        return _incident_lines(item, s)
+
     claims, notes, needs_you = [], [], False
     several = len(s["tasks"]) > 1
     for task in s["tasks"]:
@@ -188,6 +191,44 @@ def _item_lines(item, tally):
             notes.append(("reviewer", f"I couldn't sign off {_lower_first(label)}. "
                                       f"{_sentence(reason, 140)} It needs your decision."))
     return claims, notes, needs_you
+
+
+def _incident_lines(item, s):
+    """An SRE crew run (sre_crew.py), told from its incident record in output/.
+    Returns no claims, just lines, and always needs you: a fix waits for an engineer."""
+    try:
+        record = json.loads((OUTPUT_DIR / f"incident_run{item['run']['id']}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = {}
+    alert = record.get("alert", {})
+    where = alert.get("project", "").replace("-", " ") or "production"
+    item["name"] = f"the {where} fix" if alert.get("project") else "the incident fix"  # said in the closing line
+    what = alert.get("message") or alert.get("title") or "an error"
+    affected = alert.get("users_affected")
+    notes = [("narrator", f"A production alert on {where}. {_sentence(what)}"
+                          + (f" {affected} customers were affected." if affected else ""))]
+    for c in record.get("caught", []):
+        if c["planted"]:
+            opening = "The first fix was a shortcut, planted on purpose to test us. It stopped the crash, but"
+        else:
+            opening = f"Attempt {c['attempt']} was sent back:"
+        found = c["feedback"].split(": ", 1)
+        if c["by"] == "tester" and len(found) == 2:
+            names = [part.split(" (")[0] for part in found[1].rstrip(".").split("; ")]
+            detail = f"the tester's checks failed: {_list(names)}."
+        else:
+            detail = f"the {c['by']} said: {_sentence(c['feedback'], 140)}"
+        notes.append(("reviewer", f"{opening} {detail} We sent it back."))
+    if record.get("status") == "done":
+        tests = record.get("tests", "").removeprefix("PASSED: ")
+        notes.append(("narrator", f"The fix: {_sentence(record.get('fix'), 160)} It passed {tests}"))
+        notes.append(("reviewer", "Claude and Gemini both reviewed the change and passed it." if record.get("gemini")
+                      else "I reviewed the change and passed it."))
+        notes.append(("narrator", ("It's waiting for you as a draft pull request." if record.get("pr_url")
+                                   else "It's waiting for you on its own branch.") + " Nothing was merged."))
+    else:
+        notes.append(("reviewer", "I couldn't sign off a fix, so nothing was committed. It needs your decision."))
+    return [], notes, True
 
 
 def _claim_lines(claims, detail):

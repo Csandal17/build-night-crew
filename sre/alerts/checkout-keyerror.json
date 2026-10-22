@@ -1,0 +1,19 @@
+{
+  "source": "sentry",
+  "project": "checkout-service",
+  "environment": "production",
+  "level": "error",
+  "title": "KeyError: 'welcome10'",
+  "culprit": "checkout.apply_discount",
+  "message": "Checkout is failing for customers who enter a discount code in the new mobile app.",
+  "count": 214,
+  "users_affected": 187,
+  "first_seen": "2026-10-22T18:41:07Z",
+  "request": {"method": "POST", "url": "/checkout", "data": {"code": "welcome10"}},
+  "stacktrace": [
+    {"filename": "app.py", "function": "handle_checkout", "lineno": 8, "context": "total = order_total(body[\"cart\"], body.get(\"code\"))"},
+    {"filename": "checkout.py", "function": "order_total", "lineno": 22, "context": "return apply_discount(subtotal(cart), code)"},
+    {"filename": "checkout.py", "function": "apply_discount", "lineno": 16, "context": "percent = DISCOUNTS[code]"}
+  ],
+  "expected": "Customers should get their discount however they type a valid code, and an unknown or expired code should give full price instead of breaking checkout."
+}

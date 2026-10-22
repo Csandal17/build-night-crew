@@ -5,6 +5,7 @@ Pre-tested starter for Moonfire Build Night (22 Oct 2026): Claude agents with a 
 On top of that base:
 - **Always-on mode:** the crew waits for work in an inbox, wakes only when something arrives, recovers after a restart, and keeps to a daily spending cap.
 - **An independent second reviewer:** Gemini re-checks every claim Claude passes, and a claim only counts if both agree.
+- **SRE crew (Sparkles track):** a production alert wakes the crew, which fixes the bug, proves the fix with hidden tests and two reviewers, and leaves it on a branch for the engineer on call.
 - **Brief me:** a spoken handover of what the crew did while you were away, written by code from the task board and read by ElevenLabs in two voices.
 
 ![The live dashboard: a run receipt with spend against budget and review results, and the always-on inbox below](docs/dashboard.png)
@@ -161,6 +162,44 @@ A [Sparkles](https://sparkles.dev) coding agent makes the change through the Spa
 
 Safety: the agent gets at most 6 turns and 5 minutes, may edit files but not run commands without approval, runs local-only, never sees the crew's API keys, and refuses to run in a folder that contains a `.env` file. Needs the Sparkles CLI (on your PATH, at `~/sparkles-cli/sparkles`, or set `SPARKLES_BIN`). The Sparkles agent runs on your own Claude Code plan, so its cost isn't shown on the dashboard.
 
+## SRE crew: a production alert, fixed and proven (Sparkles track)
+
+A production alert wakes the crew. One agent fixes the bug, another tests the fix with tests the fixer has never seen, and reviewers check it. Only then is it committed on its own branch with a pull request description. Nothing is merged: the engineer on call decides.
+
+```mermaid
+flowchart LR
+    alert["Production alert<br/>Sentry-style JSON in inbox/"] --> watch["watch.py<br/>wakes the crew"]
+    watch --> fixer["Fixer<br/>Claude, or a Sparkles agent"]
+    fixer --> tester["Tester<br/>clean copy + hidden tests"]
+    tester -- pass --> review["Reviewers<br/>Claude, then Gemini"]
+    tester -. fail .-> fixer
+    review -. send back .-> fixer
+    review -- pass --> pr["Fix on its own branch<br/>PR text, or a draft PR"]
+    pr --> brief["ElevenWatch<br/>spoken incident briefing"]
+```
+
+```bash
+uv run sre_crew.py --reset                                        # fresh copy of the demo project, bug included
+uv run sre_crew.py sre/alerts/checkout-keyerror.json              # one alert, start to finish
+uv run sre_crew.py sre/alerts/checkout-keyerror.json --challenge --gemini
+```
+
+Always-on, with the dashboard open:
+
+```bash
+uv run watch.py --challenge --gemini --brief            # terminal 1: the crew waits for alerts
+cp sre/alerts/checkout-keyerror.json inbox/             # terminal 2: production breaks
+```
+
+- **The demo project** (`sre/demo_app/`): a small shop checkout. Discount codes are looked up exactly as typed, so when the new mobile app sends `welcome10` instead of `WELCOME10`, checkout crashes. Its own tests all pass, which is how the bug reached production. `--reset` copies it to `~/sre-demo-app` (or `SRE_APP_DIR` in `.env`) as its own git repository, so no agent works next to the crew's API keys.
+- **The alert** (`sre/alerts/checkout-keyerror.json`): what Sentry would send: the error, the stack trace, how many customers are affected, and the expected behaviour. Sentry's own webhook JSON is read too, so a real Sentry alert can be saved into `inbox/` the same way.
+- **Hidden tests** (`sre/hidden_tests/`): the tester adds them to a clean copy of the fixed project, with no API keys in reach. The fixer only hears which behaviours failed, never the test code, so a pass means the fix works rather than being written to the test.
+- **Challenge mode** shows why one agent isn't enough. The first fix is a planted shortcut, `DISCOUNTS.get(code, 0)`: the crash stops, but customers who type a valid code in lower case are quietly charged full price. The hidden tests catch it, the fixer is told exactly what failed, and the second fix passes.
+- **Sparkles:** `--sparkles` makes a Sparkles coding agent the fixer (`sparkles_agent.py`). Moving to cloud sandboxes means changing `sparkles_agent.run()` for the fixer and `run_tests()` in `sre_crew.py` for the tester; nothing else changes.
+- **Pull requests:** `--pr` pushes the fix branch and opens a draft pull request if the project has a GitHub remote and `gh` is installed. Without it, the pull request text is saved in `output/`.
+
+Tested offline with stand-in model calls (35 checks): the planted shortcut caught and fixed, edits to tests ignored, a fix that never passes held with nothing committed, Gemini unavailable held as not verified, alerts and claims routed by the watcher.
+
 ## What's in here
 
 - `llm.py`: the only way agents call Claude. Timeouts, a per-run budget cap, and cost tracking on every call.
@@ -174,6 +213,7 @@ Safety: the agent gets at most 6 turns and 5 minutes, may edit files but not run
 - `check_keys.py`: checks every API key with one tiny call each.
 - `sparkles_agent.py`: a crew worker that writes code through the Sparkles CLI, with limits, no secrets, and the real change read from git.
 - `sparkles_demo.py`: one request from start to finish: Sparkles codes, the crew reviews, one revision, then done or a human.
+- `sre_crew.py` and `sre/`: the SRE crew, its demo project, sample alert and hidden tests.
 
 The first three files work for any crew. `crew.py` and `sources/` are the example to adapt or swap out.
 

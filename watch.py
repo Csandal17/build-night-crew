@@ -2,7 +2,8 @@
 
 Plain code does the waiting, so nothing costs money while the inbox is quiet.
 
-- Every few seconds, check inbox/ for new or edited .txt files (one claim or goal per file).
+- Every few seconds, check inbox/ for new or edited files: a .txt file holds a claim or goal
+  for the evidence crew, a .json file holds a production alert for the SRE crew (sre_crew.py).
 - Each file version gets a fixed ID: its name plus a fingerprint of its text. The same
   file seen twice is ignored, and an edited file counts as new work.
 - Work runs one piece at a time, through the same crew as crew.py.
@@ -14,9 +15,12 @@ Run:  uv run watch.py            (stop with Ctrl+C)
       uv run watch.py --gemini   (every claim also gets an independent Gemini review)
       uv run watch.py --brief    (after each piece of work, a spoken briefing appears in the
                                  dashboard's player, ready to play; needs ELEVENLABS_API_KEY)
+For alerts:  --challenge (plant a shortcut fix first), --sparkles (a Sparkles agent is the
+             fixer), --pr (open a draft pull request if the project has a GitHub remote)
 """
 
 import hashlib
+import json
 import sys
 import time
 from datetime import datetime
@@ -26,6 +30,7 @@ import board
 import brief
 import crew
 import dashboard
+import sre_crew
 
 HERE = Path(__file__).parent
 INBOX = HERE / "inbox"
@@ -35,6 +40,10 @@ MAX_ATTEMPTS = 2          # first try plus one retry
 DAILY_BUDGET_USD = 1.00   # across every run today, on top of each run's own budget
 USE_GEMINI = False        # set by --gemini
 BRIEF_AFTER_WORK = False  # set by --brief
+CHALLENGE = False         # alerts only: set by --challenge
+USE_SPARKLES = False      # alerts only: set by --sparkles
+OPEN_PR = False           # alerts only: set by --pr
+_unreadable = set()       # .json files already reported as not valid JSON (yet)
 
 
 def log(message):
@@ -49,10 +58,19 @@ def fingerprint(text):
 def check_inbox():
     """Queue every new or edited file. Returns how many were queued."""
     queued = 0
-    for path in sorted(INBOX.glob("*.txt")):
+    for path in sorted([*INBOX.glob("*.txt"), *INBOX.glob("*.json")]):
         text = path.read_text(encoding="utf-8").strip()
         if not text:
             continue  # an empty file (maybe still being written) is skipped until it has text
+        if path.suffix == ".json":
+            try:
+                text = json.dumps(json.loads(text))  # one tidy line, stored as the event's goal
+            except ValueError:
+                if path.name not in _unreadable:
+                    log(f"{path.name} isn't valid JSON (yet), so it's skipped until it is.")
+                    _unreadable.add(path.name)
+                continue
+            _unreadable.discard(path.name)
         if board.add_event(path.name, fingerprint(text), text):
             log(f"New work: {path.name}")
             queued += 1
@@ -72,10 +90,15 @@ def make_briefing():
         log(f"Couldn't make a briefing this time: {problem}")
 
 
-def can_afford_a_run():
+def is_alert(event):
+    return bool(event) and event["source"].endswith(".json")
+
+
+def can_afford_a_run(event=None):
     """Only start a run if today's spending plus that run's full budget stays under the cap.
     Same rule as llm.py: never start what you can't afford in the worst case."""
-    return board.spent_today() + crew.BUDGET_USD <= DAILY_BUDGET_USD
+    budget = sre_crew.BUDGET_USD if is_alert(event) else crew.BUDGET_USD
+    return board.spent_today() + budget <= DAILY_BUDGET_USD
 
 
 def work_on(event):
@@ -93,7 +116,11 @@ def work_on(event):
     log(f"Waking the crew for {event['source']} (attempt {attempt} of {MAX_ATTEMPTS})")
 
     try:
-        run_id = crew.main(event["goal"], use_gemini=USE_GEMINI)
+        if is_alert(event):
+            run_id = sre_crew.main(event["goal"], use_gemini=USE_GEMINI, challenge=CHALLENGE,
+                                   use_sparkles=USE_SPARKLES, open_pr=OPEN_PR)
+        else:
+            run_id = crew.main(event["goal"], use_gemini=USE_GEMINI)
     except Exception as error:
         retry = attempt < MAX_ATTEMPTS
         board.update_event(event["id"], status="waiting" if retry else "failed",
@@ -119,7 +146,10 @@ def main():
     log(f"Always-on crew started. Checking {INBOX.name}/ every {CHECK_SECONDS}s, "
         f"daily cap ${DAILY_BUDGET_USD:.2f} (${board.spent_today():.4f} spent today)."
         + (" Gemini second review is on." if USE_GEMINI else "")
-        + (" A briefing follows each piece of work." if BRIEF_AFTER_WORK else ""))
+        + (" A briefing follows each piece of work." if BRIEF_AFTER_WORK else "")
+        + (" Alerts: " + ", ".join(name for name, on in (
+            ("challenge mode", CHALLENGE), ("Sparkles fixer", USE_SPARKLES), ("draft PRs", OPEN_PR)) if on)
+           + "." if CHALLENGE or USE_SPARKLES or OPEN_PR else ""))
     if interrupted_runs:
         log(f"Marked {interrupted_runs} run(s) cut off last time as interrupted.")
     if recovered:
@@ -135,12 +165,12 @@ def main():
 
             if event is None:
                 if not said_waiting:
-                    log("Waiting for work. Drop a .txt file into inbox/.")
+                    log("Waiting for work. Drop a .txt claim or a .json alert into inbox/.")
                     said_waiting = True
                 time.sleep(CHECK_SECONDS)
                 continue
 
-            if not can_afford_a_run():
+            if not can_afford_a_run(event):
                 if not said_paused:
                     log(f"Daily cap reached: ${board.spent_today():.4f} spent today. "
                         "New work stays queued until tomorrow.")
@@ -157,4 +187,7 @@ def main():
 if __name__ == "__main__":
     USE_GEMINI = "--gemini" in sys.argv[1:]
     BRIEF_AFTER_WORK = "--brief" in sys.argv[1:]
+    CHALLENGE = "--challenge" in sys.argv[1:]
+    USE_SPARKLES = "--sparkles" in sys.argv[1:]
+    OPEN_PR = "--pr" in sys.argv[1:]
     main()
