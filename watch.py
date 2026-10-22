@@ -12,6 +12,8 @@ Plain code does the waiting, so nothing costs money while the inbox is quiet.
 
 Run:  uv run watch.py            (stop with Ctrl+C)
       uv run watch.py --gemini   (every claim also gets an independent Gemini review)
+      uv run watch.py --brief    (after each piece of work, a spoken briefing appears in the
+                                 dashboard's player, ready to play; needs ELEVENLABS_API_KEY)
 """
 
 import hashlib
@@ -21,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 import board
+import brief
 import crew
 import dashboard
 
@@ -31,6 +34,7 @@ CHECK_SECONDS = 5
 MAX_ATTEMPTS = 2          # first try plus one retry
 DAILY_BUDGET_USD = 1.00   # across every run today, on top of each run's own budget
 USE_GEMINI = False        # set by --gemini
+BRIEF_AFTER_WORK = False  # set by --brief
 
 
 def log(message):
@@ -55,6 +59,19 @@ def check_inbox():
     return queued
 
 
+def make_briefing():
+    """With --brief: a spoken briefing of what just happened, ready to play on the dashboard.
+    A problem with ElevenLabs is logged and never stops the watcher."""
+    if not BRIEF_AFTER_WORK:
+        return
+    try:
+        path = brief.main(["--no-play"])
+        if path:
+            log(f"Briefing ready to play on the dashboard ({path.name}).")
+    except (Exception, SystemExit) as problem:
+        log(f"Couldn't make a briefing this time: {problem}")
+
+
 def can_afford_a_run():
     """Only start a run if today's spending plus that run's full budget stays under the cap.
     Same rule as llm.py: never start what you can't afford in the worst case."""
@@ -67,6 +84,7 @@ def work_on(event):
         board.update_event(event["id"], status="failed",
                            error=event["error"] or "Interrupted too many times.")
         log(f"Giving up on {event['source']} after {event['attempts']} attempts. Needs a human.")
+        make_briefing()
         return
 
     attempt = event["attempts"] + 1
@@ -83,12 +101,15 @@ def work_on(event):
         dashboard.render()
         log(f"{event['source']} hit an error: {error}. "
             + ("Will try once more." if retry else "Giving up. Needs a human."))
+        if not retry:
+            make_briefing()
         return
 
     board.update_event(event["id"], status="done", run_id=run_id, error=None)
     dashboard.render(run_id)
     outcome = board.summary(run_id)["run"]["status"].replace("_", " ")
     log(f"Done: {event['source']} (run {run_id}, {outcome})")
+    make_briefing()
 
 
 def main():
@@ -97,7 +118,8 @@ def main():
     recovered = board.recover_events()
     log(f"Always-on crew started. Checking {INBOX.name}/ every {CHECK_SECONDS}s, "
         f"daily cap ${DAILY_BUDGET_USD:.2f} (${board.spent_today():.4f} spent today)."
-        + (" Gemini second review is on." if USE_GEMINI else ""))
+        + (" Gemini second review is on." if USE_GEMINI else "")
+        + (" A briefing follows each piece of work." if BRIEF_AFTER_WORK else ""))
     if interrupted_runs:
         log(f"Marked {interrupted_runs} run(s) cut off last time as interrupted.")
     if recovered:
@@ -134,4 +156,5 @@ def main():
 
 if __name__ == "__main__":
     USE_GEMINI = "--gemini" in sys.argv[1:]
+    BRIEF_AFTER_WORK = "--brief" in sys.argv[1:]
     main()

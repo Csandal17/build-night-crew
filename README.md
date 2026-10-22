@@ -87,7 +87,7 @@ echo "Adults should consider taking a daily vitamin D supplement during autumn a
 #    Copy the same file under the same name again and nothing new runs.
 ```
 
-`uv run watch.py --gemini` gives every claim the second review too.
+`uv run watch.py --gemini` gives every claim the second review too, and `uv run watch.py --brief` makes a spoken briefing after each piece of work, ready to play on the dashboard. The options combine: `uv run watch.py --gemini --brief`.
 
 ## Brief me
 
@@ -98,6 +98,8 @@ uv run brief.py --detail    # one line per claim with its reason, instead of gro
 ```
 
 A spoken handover for when you've been away. The script is written by code from `board.db`, not by a model, so it only says what actually happened: what arrived, each verdict, what a reviewer sent back, and what needs your decision. ElevenLabs reads it in two voices, a narrator for the crew and a second voice for the reviewers (falling back to one voice if two-voice dialogue isn't available on your plan). Each briefing stays under 2,000 characters, and audio is saved to `output/`.
+
+The newest briefing also appears in a **Latest briefing** player on the dashboard (bottom left), with its script showing who says each line. The player sits outside the part of the page that refreshes, so a briefing keeps playing while the crew works, and a new one is tagged **New** until you press play. Browsers don't play sound on their own, so you press play.
 
 ## What's in here
 
