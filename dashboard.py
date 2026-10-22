@@ -104,6 +104,34 @@ h2 { font-size: 32px; font-weight: 800; margin: 0 0 24px; }
   display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: center; }
 .event .label { font-weight: 700; }
 .event p { grid-column: 1 / -1; margin: 0; color: var(--text); font-size: 16px; }
+.feed-wrap { background: var(--card); border-radius: 12px; padding: 8px 8px 8px 20px; }
+.feed { display: grid; gap: 12px; max-height: 560px; overflow-y: auto; padding: 12px 12px 12px 0;
+  scroll-behavior: smooth; }
+.msg { border-left: 4px solid #C5D1DE; padding: 6px 0 6px 14px; }
+.msg .msg-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  font-family: 'Bricolage Grotesque', 'Avenir Next', 'Segoe UI', sans-serif; font-size: 15px; }
+.msg .who { font-weight: 800; padding: 1px 10px; border-radius: 22px; color: var(--ink); }
+.msg .to { color: var(--muted); font-weight: 700; }
+.msg .kind { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--ink); background: #E5EBF1; border-radius: 4px; padding: 1px 7px; }
+.msg .when { margin-left: auto; color: var(--muted); font-size: 14px; }
+.msg p { margin: 6px 0 0; font-size: 17px; color: var(--text); }
+.msg .ev { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.msg .ev span { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 13px; font-weight: 600;
+  background: #EEF3F7; border: 1px solid #C5D1DE; border-radius: 4px; padding: 0 6px; color: var(--ink); }
+.msg.k-challenge, .msg.k-alert { border-left-color: #E98A4E; background: #FDF3EC; border-radius: 0 8px 8px 0; }
+.msg.k-challenge .kind, .msg.k-alert .kind { background: #E98A4E; }
+.msg.k-hypothesis, .msg.k-fix { border-left-color: #F2B33D; }
+.msg.k-hypothesis .kind, .msg.k-fix .kind { background: #F2B33D; }
+.msg.k-evidence { border-left-color: #8FB3D3; }
+.msg.k-evidence .kind { background: #CFE0EE; }
+.msg.k-agree, .msg.k-verdict { border-left-color: #7FB77E; }
+.msg.k-agree .kind, .msg.k-verdict .kind { background: #7FB77E; }
+.msg.k-verdict { background: #EEF6EC; border-radius: 0 8px 8px 0; }
+.msg.arrive { animation: arrive 1.6s ease-out; }
+@keyframes arrive { 0% { background-color: #FCE7B6; } 100% { background-color: transparent; } }
+@media (prefers-reduced-motion: reduce) { .msg.arrive { animation: none; } .feed { scroll-behavior: auto; } }
+@media (max-width: 640px) { .feed-wrap { padding-left: 12px; } .msg .when { margin-left: 0; } }
 footer { margin-top: 64px; background: var(--navy); color: #DCE4EF; padding: 24px 0; font-size: 15px; }
 """
 
@@ -145,6 +173,44 @@ def _task_costs(run_id):
         (run_id,),
     )
     return {row["task_id"]: row["cost"] for row in rows}
+
+
+WHO_COLOURS = ("#EEEDFE", "#E1F5EE", "#FDF0D5", "#E3EEF8", "#F8E3EC", "#EAF4DF", "#F1EFE8", "#E6F0FA")
+
+
+def _who(name):
+    """Each agent keeps the same colour chip, so you can follow who's talking."""
+    colour = WHO_COLOURS[sum(map(ord, name.lower())) % len(WHO_COLOURS)]
+    return f'<span class="who" style="background:{colour}">{escape(name)}</span>'
+
+
+def _clock(iso):
+    try:
+        return datetime.fromisoformat(iso).astimezone().strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return ""
+
+
+def _message_html(m):
+    to = f'<span class="to">\u2192 {escape(m["recipient"])}</span>' if m["recipient"] else ""
+    ids = "".join(f"<span>{escape(e)}</span>" for e in m["evidence"])
+    return f"""<div class="msg k-{escape(m['kind'])}" data-id="{m['id']}">
+      <div class="msg-head">{_who(m['sender'])}{to}<span class="kind">{escape(m['kind'])}</span>
+        <span class="when">{_clock(m['created_at'])}</span></div>
+      <p>{escape(m['text'])}</p>{f'<div class="ev">{ids}</div>' if ids else ''}
+    </div>"""
+
+
+def _feed_html(run_id=None):
+    """The crew conversation: what the agents say to each other, newest at the bottom."""
+    rows = board.messages(run_id)
+    if not rows:
+        return ""
+    challenges = sum(m["kind"] == "challenge" for m in rows)
+    note = f"{len(rows)} messages" + (f" \u00b7 {challenges} challenged" if challenges else "")
+    items = "".join(_message_html(m) for m in rows)
+    return f"""<section><h2>Crew conversation</h2><p class="watcher">{note}</p>
+  <div class="feed-wrap"><div class="feed" id="feed">{items}</div></div></section>"""
 
 
 def _goal_text(goal):
@@ -193,7 +259,8 @@ def _body(run_id=None):
     runs = board.all_runs()
     inbox_html = _inbox_html()
     if not runs:
-        return f"<div class='wrap'>{inbox_html}<section><p>No runs yet.</p></section></div>"
+        return (f"<div class='wrap'>{_feed_html()}{inbox_html}"
+                "<section><p>No runs yet.</p></section></div>")
     run_id = run_id or runs[-1]["id"]
     s = board.summary(run_id)
     run, total = s["run"], s["total_usd"]
@@ -276,6 +343,7 @@ def _body(run_id=None):
   </div>
 </div></div></div>
 <div class="wrap">
+  {_feed_html(run_id)}
   {inbox_html}
   <section><h2>Cost by agent</h2>{agents_html}</section>
   <section><h2>Task board</h2><div class="tasks">{tasks_html}</div></section>
@@ -405,12 +473,36 @@ def render(run_id=None):
   showBrief({_js(briefing)});
   briefReady = true;
 
+  // The crew feed stays scrolled to the newest message (unless you've scrolled up to read),
+  // and messages that just arrived get a brief highlight.
+  var lastMsg = -1;
+  function settleFeed(stick, oldTop) {{
+    var feed = document.getElementById("feed");
+    if (!feed) return;
+    feed.style.scrollBehavior = "auto";
+    feed.scrollTop = stick ? feed.scrollHeight : oldTop;
+    feed.style.scrollBehavior = "";
+    var newest = lastMsg;
+    feed.querySelectorAll(".msg").forEach(function (m) {{
+      var id = +m.dataset.id;
+      if (lastMsg >= 0 && id > lastMsg) m.classList.add("arrive");
+      if (id > newest) newest = id;
+    }});
+    lastMsg = newest;
+  }}
+  settleFeed(true, 0);
+
   window.renderDash = function (html, brief) {{
     showBrief(brief);
     if (html === current) return;
     var firstLoad = current === null;
     current = html;
+    var oldFeed = document.getElementById("feed");
+    var stick = !oldFeed || oldFeed.scrollHeight - oldFeed.scrollTop - oldFeed.clientHeight < 60;
+    var oldTop = oldFeed ? oldFeed.scrollTop : 0;
+    if (lastMsg < 0) lastMsg = 0;  // from now on, new messages are highlighted
     app.innerHTML = html;
+    settleFeed(stick, oldTop);
     if (!firstLoad) {{
       app.classList.remove("changed");
       void app.offsetWidth;  // restart the glow animation

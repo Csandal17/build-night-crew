@@ -200,6 +200,27 @@ cp sre/alerts/checkout-keyerror.json inbox/             # terminal 2: production
 
 Tested offline with stand-in model calls (35 checks): the planted shortcut caught and fixed, edits to tests ignored, a fix that never passes held with nothing committed, Gemini unavailable held as not verified, alerts and claims routed by the watcher.
 
+## Crew feed: watch the agents talk
+
+The dashboard's **Crew conversation** panel shows what the agents say to each other as it happens: who said it, to whom, what kind of message it is, and the evidence IDs it cites. Challenges are highlighted, so the audience sees agents disagree. The SRE crew posts to it automatically; any other agent posts with one line:
+
+```python
+from feed import post
+post("Skeptic", "The disk warning started 28 hours before the first error.",
+     to="Diagnostician", kind="challenge", evidence=["E2", "E1"])
+```
+
+From a terminal or another language:
+
+```bash
+uv run feed.py say Skeptic "The disk warning started 28 hours earlier." --to Diagnostician --kind challenge --evidence E2,E1
+uv run feed.py demo    # a sample incident conversation, one message every 2 seconds
+uv run feed.py clear   # empty the feed before a demo
+uv run feed.py live    # keep the dashboard refreshing, for code that writes to board.db directly
+```
+
+Kinds: `alert`, `evidence`, `hypothesis`, `fix`, `challenge`, `reply`, `agree`, `verdict`, `note`. The feed stays on the newest message unless you've scrolled up to read, and new messages are highlighted as they arrive.
+
 ## What's in here
 
 - `llm.py`: the only way agents call Claude. Timeouts, a per-run budget cap, and cost tracking on every call.
@@ -214,6 +235,7 @@ Tested offline with stand-in model calls (35 checks): the planted shortcut caugh
 - `sparkles_agent.py`: a crew worker that writes code through the Sparkles CLI, with limits, no secrets, and the real change read from git.
 - `sparkles_demo.py`: one request from start to finish: Sparkles codes, the crew reviews, one revision, then done or a human.
 - `sre_crew.py` and `sre/`: the SRE crew, its demo project, sample alert and hidden tests.
+- `feed.py`: the crew feed. Agents post messages; the dashboard shows the conversation live.
 
 The first three files work for any crew. `crew.py` and `sources/` are the example to adapt or swap out.
 

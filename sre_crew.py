@@ -40,6 +40,7 @@ from dotenv import load_dotenv
 import board
 import crew
 import dashboard
+import feed
 import gemini
 import sparkles_agent
 from llm import SMART, BudgetExceeded, ask_json
@@ -397,7 +398,10 @@ def main(alert, use_gemini=False, challenge=False, use_sparkles=False, open_pr=F
     record = {"alert": alert, "challenge": challenge, "gemini": use_gemini, "caught": [],
               "status": "running", "fix": "", "tests": "", "branch": None, "pr_url": None, "pr_file": None}
     _save_record(run_id, record)
-    dashboard.render(run_id)
+    fixer = "Sparkles fixer" if use_sparkles else "Fixer"
+    affected = f" {alert['users_affected']} customers affected." if alert.get("users_affected") else ""
+    feed.post("Monitor", f"{alert.get('title', 'Production error')} in {alert.get('culprit') or 'production'}. "
+              f"{alert.get('message', '')}{affected}".strip(), to=fixer, kind="alert", run_id=run_id)
     print(f"Run {run_id}: {alert.get('title')} in {app}")
 
     request = (f"{text}\n\nFix the root cause in this project. Make the smallest change that gives "
@@ -417,9 +421,14 @@ def main(alert, use_gemini=False, challenge=False, use_sparkles=False, open_pr=F
             label = "PLANTED SHORTCUT" if planted else "FIX"
             crew._set(run_id, t_fix, status="waiting_review",
                       result=f"{label}: {work['message']} (files: {', '.join(work['files']) or 'none'})")
+            feed.post("Challenge mode" if planted else fixer,
+                      ("A shortcut fix, planted on purpose to test the crew: " if planted else "")
+                      + (work["message"] or "Changed " + ", ".join(work["files"])), to="Tester", kind="fix",
+                      run_id=run_id)
 
             if not work["diff"]:
                 by, feedback = "code check", "No files were changed."
+                feed.post("Code check", feedback, to=fixer, kind="challenge", run_id=run_id)
             else:
                 crew._set(run_id, t_test, status="running", attempts=attempt)
                 tests = run_tests(app)
@@ -427,7 +436,10 @@ def main(alert, use_gemini=False, challenge=False, use_sparkles=False, open_pr=F
                 print(f"  tester: {tests['summary']}")
                 if not tests["passed"]:
                     by, feedback = "tester", tests["feedback"]
+                    feed.post("Tester", f"Sent back. {feedback}", to=fixer, kind="challenge", run_id=run_id)
                 else:
+                    feed.post("Tester", tests["summary"].replace("PASSED: ", "Passed: "), to="Reviewer",
+                              kind="agree", run_id=run_id)
                     crew._set(run_id, t_review, status="running", attempts=attempt)
                     try:
                         passed, notes = review(run_id, t_review, text, work, tests, use_gemini)
@@ -435,13 +447,23 @@ def main(alert, use_gemini=False, challenge=False, use_sparkles=False, open_pr=F
                         raise
                     except Exception as error:  # Gemini unreachable: not verified, so not passed
                         notes = f"Second review unavailable, so not verified: {error}"
+                        feed.post("Gemini reviewer", notes, to="Crew", kind="challenge", run_id=run_id)
                         break
                     if passed:
                         status = "done"
                         crew._set(run_id, t_review, status="done", result=f"PASSED: {notes}")
+                        claude_notes, _, gemini_notes = notes.partition(" Gemini agreed: ")
+                        feed.post("Reviewer", f"Passed. {claude_notes}", to=fixer, kind="agree", run_id=run_id)
+                        if gemini_notes:
+                            feed.post("Gemini reviewer", f"Agreed. {gemini_notes}", to=fixer, kind="agree",
+                                      run_id=run_id)
                         break
                     by, feedback = "reviewer", notes
                     crew._set(run_id, t_review, status="revising", result=f"SENT BACK: {notes}")
+                    gemini_said = notes.startswith("Reviewers disagree.")
+                    feed.post("Gemini reviewer" if gemini_said else "Reviewer",
+                              f"Sent back. {notes.removeprefix('Reviewers disagree. Gemini: ')}",
+                              to=fixer, kind="challenge", run_id=run_id)
 
             record["caught"].append({"attempt": attempt, "by": by, "feedback": feedback, "planted": planted})
             _save_record(run_id, record)
@@ -464,6 +486,9 @@ def main(alert, use_gemini=False, challenge=False, use_sparkles=False, open_pr=F
             record.update(branch=branch, pr_url=url, pr_file=str(body_path.relative_to(HERE)))
             crew._set(run_id, t_review, result=f"PASSED: {notes} Ready on branch {branch}"
                                                + (f", draft PR {url}" if url else "") + ".")
+            feed.post("Crew", f"Fix ready for your review on branch {branch}"
+                      + (f" (draft pull request: {url})" if url else "") + f". {tests['summary'].replace('PASSED: ', 'Passed ')} "
+                      "Nothing was merged.", to="On-call engineer", kind="verdict", run_id=run_id)
         else:
             for task_id in (t_fix, t_test, t_review):
                 if board._fetch("SELECT status FROM tasks WHERE id = ?", (task_id,))[0]["status"] != "done":
@@ -471,6 +496,9 @@ def main(alert, use_gemini=False, challenge=False, use_sparkles=False, open_pr=F
             crew._set(run_id, t_review, review_notes=notes or record["caught"][-1]["feedback"])
             _git(app, "checkout", "-q", "-f", base)  # unverified work never stays in the project
             _git(app, "clean", "-fdq")
+            feed.post("Crew", "Held for you: no fix passed every check, so nothing was committed. "
+                      + (notes or record["caught"][-1]["feedback"]), to="On-call engineer", kind="verdict",
+                      run_id=run_id)
         board.finish_run(run_id, status="completed" if status == "done" else "needs_human")
         record["status"] = "done" if status == "done" else "needs_human"
         _save_record(run_id, record)

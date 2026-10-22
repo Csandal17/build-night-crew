@@ -4,6 +4,7 @@ It survives restarts, so work is never lost if the script stops,
 and it records the cost of every model call for the dashboard.
 """
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,16 @@ CREATE TABLE IF NOT EXISTS events (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     UNIQUE (source, fingerprint)
+);
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER REFERENCES runs(id),
+    sender TEXT NOT NULL,
+    recipient TEXT,
+    kind TEXT NOT NULL DEFAULT 'note',
+    text TEXT NOT NULL,
+    evidence TEXT,
+    created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS briefings (
     id INTEGER PRIMARY KEY,
@@ -267,6 +278,42 @@ def events_since(since=None, limit=5):
         rows = _fetch("SELECT * FROM events WHERE updated_at > ? "
                       "ORDER BY updated_at DESC, id DESC LIMIT ?", (since, limit))
     return list(reversed(rows))
+
+
+# ---------- messages: what the agents say to each other (the dashboard's crew feed) ----------
+
+MESSAGE_KINDS = {"alert", "evidence", "hypothesis", "fix", "challenge", "reply", "agree", "verdict", "note"}
+
+
+def say(sender, text, *, to=None, kind="note", evidence=None, run_id=None):
+    """Post one message to the crew feed. `evidence` is a list of IDs like ["E1", "E4"].
+    Use feed.post() instead if you also want the dashboard refreshed straight away."""
+    kind = kind if kind in MESSAGE_KINDS else "note"
+    ids = json.dumps([str(e) for e in evidence]) if evidence else None
+    return _execute(
+        """INSERT INTO messages (run_id, sender, recipient, kind, text, evidence, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (run_id, sender, to, kind, text, ids, _now()),
+    )
+
+
+def messages(run_id=None, limit=60):
+    """The latest messages, oldest first: for one run (plus any posted without a run
+    since it started), or everything when no run is given."""
+    if run_id is None:
+        rows = _fetch("SELECT * FROM messages ORDER BY id DESC LIMIT ?", (limit,))
+    else:
+        rows = _fetch(
+            """SELECT * FROM messages WHERE run_id = ? OR (run_id IS NULL AND created_at >=
+                   (SELECT started_at FROM runs WHERE id = ?)) ORDER BY id DESC LIMIT ?""",
+            (run_id, run_id, limit))
+    for row in rows:
+        row["evidence"] = json.loads(row["evidence"]) if row["evidence"] else []
+    return list(reversed(rows))
+
+
+def clear_messages():
+    _execute("DELETE FROM messages")
 
 
 # ---------- briefings: the spoken handovers made by brief.py ----------
