@@ -9,6 +9,53 @@ On top of that base:
 
 ![The live dashboard: a run receipt with spend against budget and review results, and the always-on inbox below](docs/dashboard.png)
 
+## How it works
+
+Work comes in two ways: drop a claim file into the inbox (the watcher wakes the crew), or run `crew.py` yourself. Everything the crew does is recorded on the task board, which the dashboard and the spoken briefing read from.
+
+```mermaid
+flowchart TD
+    inbox["Inbox folder<br/>drop a claim file"] --> watch["watch.py<br/>wakes on new work"]
+    watch --> crew["The crew<br/>plan, check, review"]
+    hand["crew.py<br/>you start a run"] --> crew
+    crew --> board[("Task board<br/>board.db: runs, tasks, costs")]
+    board --> dash["Dashboard<br/>costs, inbox, player"]
+    board --> brief["Brief me<br/>ElevenLabs, two voices"]
+    brief --> dash
+
+    classDef code fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+    classDef agents fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef seen fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    class inbox,watch,hand,board code
+    class crew agents
+    class dash,brief seen
+```
+
+Inside the crew, every claim goes through the same checks. Plain code checks the quotes before any reviewer sees them, and anything sent back gets one revision before it's held for a human.
+
+```mermaid
+flowchart TD
+    coord["Coordinator<br/>Haiku · splits the goal"] --> worker["Worker<br/>Sonnet · answers with quotes"]
+    worker --> check["Code check<br/>quotes match the sources?"]
+    check -- yes --> claude["Claude reviewer<br/>Sonnet · pass or send back"]
+    claude -- pass --> gemini["Gemini reviewer<br/>Flash · optional second opinion"]
+    gemini -- agrees --> done["Done<br/>counts in the brief"]
+    check -. "quotes don't match" .-> again{"Already revised once?"}
+    claude -. send back .-> again
+    gemini -. disagrees .-> again
+    again -- "no: revise" --> worker
+    again -- "yes" --> human["Held for a human<br/>marked not verified"]
+
+    classDef code fill:#F1EFE8,stroke:#5F5E5A,color:#2C2C2A
+    classDef agents fill:#EEEDFE,stroke:#534AB7,color:#26215C
+    classDef good fill:#E1F5EE,stroke:#0F6E56,color:#04342C
+    class check,again,human code
+    class coord,worker,claude,gemini agents
+    class done good
+```
+
+Without `--gemini`, a pass from the Claude reviewer goes straight to Done. In challenge mode, a mistake is planted after the worker; the quotes stay real, so only a reviewer can catch it.
+
 ## Tested end to end (21 and 22 Oct 2026, real API calls)
 
 | What | Result |
