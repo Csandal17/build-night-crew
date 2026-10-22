@@ -103,6 +103,47 @@ A spoken handover for when you've been away. The script is written by code from 
 
 The newest briefing also appears in a **Latest briefing** player on the dashboard (bottom left), with its script showing who says each line. The player sits outside the part of the page that refreshes, so a briefing keeps playing while the crew works, and a new one is tagged **New** until you press play. Browsers don't play sound on their own, so you press play.
 
+## General pipeline: any goal, in parallel (branch `general_pipeline`)
+
+```bash
+uv run pipeline.py                          # default goal, using the NHS pack in sources/
+uv run pipeline.py "your goal" --web-search # researchers find pages with Claude's web search tool
+uv run pipeline.py "your goal" --gemini     # Gemini must also pass every section
+uv run pipeline.py "your goal" --parallel 1 # one agent at a time (default is 3)
+uv run watch.py --pipeline --daily-budget 3 # always-on, using the pipeline
+uv run --with pytest pytest tests           # 29 offline tests: no API keys, no network
+```
+
+`crew.py` checks a few claims against a fixed pack. `pipeline.py` takes any goal and works like this:
+
+1. **Coordinator** splits the goal into `research` and `write` tasks and says which depend on which.
+2. **Researchers** run in parallel. They only *propose* pages. Code (`workspace.py`) fetches each page, refuses anything that isn't a public web address, and saves what the page really said to the run's library (`workspace/run_<id>/sources/`).
+3. **Writers** start as soon as their research is done and write one section each, quoting sources.
+4. **Gate** (`gates.py`, plain code): were pages really saved? Does every quote appear word for word in a source the writer was given? Reviewers only see work that passed.
+5. **Reviewers** (Claude, then Gemini with `--gemini`) judge the section and the authority of its sources. One revision is allowed, then the section is held for a human.
+6. Code assembles the brief in `output/` from reviewed sections only.
+
+**Messages.** Agents talk on the board (the `messages` table, shown as the **Message feed** on the dashboard). A writer that lacks a source says so, which starts a new research task and makes the writer wait for it (`request`); researchers announce what they filed (`offer`); reviewers send work back (`challenge`) and writers answer (`reply`); stuck work is flagged to the coordinator (`escalate`). A run holds at most 60 messages and 2 extra source requests.
+
+**Money.** Every call reserves its worst-case cost before it starts and releases it when the real cost is recorded, so parallel agents can never take a run past its budget (`llm.reserve`). Gemini calls are limited to 2 at a time (`GEMINI_MAX_CONCURRENT`). Web searches are recorded at an assumed $0.01 each: check Anthropic's pricing.
+
+**Not yet tested with live keys.** The tests use fake models and fake web pages. Check with real keys before relying on: the researcher's URL proposals, `--web-search` (if the tool isn't enabled on your key, researchers say so on the feed and fall back to proposing URLs), and fetching real pages.
+
+## Demo: a simulated Sentry alert wakes the crew
+
+Everything here is simulated and labelled as such. The exception is real; Sentry is not.
+
+```
+uv run make_demo_service.py          # a tiny checkout service with a real git history and a log (../demo-service)
+uv run sentry_webhook.py             # receiver on 127.0.0.1:8787, writes alerts into inbox/
+uv run sentry_mock.py                # runs a failing request for real, sends the Sentry-style alert
+uv run watch.py --pipeline --daily-budget 3
+```
+
+`make_demo_service.py` builds four commits; the last one ("Speed up pricing: cache exchange rates") leaves GBP out of a rate cache, so every GBP order raises `KeyError: 'GBP'`. `sentry_mock.py` takes the real stack trace and source lines from that failure, signs the alert (HMAC-SHA256, `SENTRY_CLIENT_SECRET` on both sides) and posts it with an `X-Simulated` header that the receiver copies into the crew's task. Repeat alerts for the same issue and release are one piece of work.
+
+The alert shapes and signature header follow Sentry's published docs as described in secondary sources. They have not been checked against a delivery from a real Sentry project. The pipeline cannot yet read the service's git history or log; that investigator step is still to build.
+
 ## What's in here
 
 - `llm.py`: the only way agents call Claude. Timeouts, a per-run budget cap, and cost tracking on every call.
@@ -114,6 +155,11 @@ The newest briefing also appears in a **Latest briefing** player on the dashboar
 - `gemini.py`: Gemini as a second, independent reviewer, with the same budget check and cost tracking as `llm.py`.
 - `brief.py`: the spoken briefing (ElevenLabs), written by code from the task board.
 - `check_keys.py`: checks every API key with one tiny call each.
+- `pipeline.py`: the general crew (coordinator, parallel researchers and writers, reviewers, messages).
+- `workspace.py`: the per-run library: fetches pages safely and saves them, and checks quotes.
+- `gates.py`: the deterministic check for each task type, run before any reviewer.
+- `make_demo_service.py`, `sentry_mock.py`, `sentry_webhook.py`: the simulated production error, the mock Sentry alert, and the receiver that queues it.
+- `tests/`: offline tests for the pipeline, budget reservation, messages and the old paths.
 
 The first three files work for any crew. `crew.py` and `sources/` are the example to adapt or swap out.
 

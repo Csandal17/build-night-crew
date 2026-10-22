@@ -14,6 +14,9 @@ Run:  uv run watch.py            (stop with Ctrl+C)
       uv run watch.py --gemini   (every claim also gets an independent Gemini review)
       uv run watch.py --brief    (after each piece of work, a spoken briefing appears in the
                                  dashboard's player, ready to play; needs ELEVENLABS_API_KEY)
+      uv run watch.py --pipeline (use the general pipeline: researchers, parallel writers and
+                                 messages, instead of the fixed claim checker)
+      uv run watch.py --daily-budget 3.00   (change the daily spending cap)
 """
 
 import hashlib
@@ -26,6 +29,7 @@ import board
 import brief
 import crew
 import dashboard
+import pipeline
 
 HERE = Path(__file__).parent
 INBOX = HERE / "inbox"
@@ -35,6 +39,7 @@ MAX_ATTEMPTS = 2          # first try plus one retry
 DAILY_BUDGET_USD = 1.00   # across every run today, on top of each run's own budget
 USE_GEMINI = False        # set by --gemini
 BRIEF_AFTER_WORK = False  # set by --brief
+RUNNER = crew             # set to pipeline by --pipeline
 
 
 def log(message):
@@ -75,7 +80,7 @@ def make_briefing():
 def can_afford_a_run():
     """Only start a run if today's spending plus that run's full budget stays under the cap.
     Same rule as llm.py: never start what you can't afford in the worst case."""
-    return board.spent_today() + crew.BUDGET_USD <= DAILY_BUDGET_USD
+    return board.spent_today() + RUNNER.BUDGET_USD <= DAILY_BUDGET_USD
 
 
 def work_on(event):
@@ -93,7 +98,7 @@ def work_on(event):
     log(f"Waking the crew for {event['source']} (attempt {attempt} of {MAX_ATTEMPTS})")
 
     try:
-        run_id = crew.main(event["goal"], use_gemini=USE_GEMINI)
+        run_id = RUNNER.main(event["goal"], use_gemini=USE_GEMINI)
     except Exception as error:
         retry = attempt < MAX_ATTEMPTS
         board.update_event(event["id"], status="waiting" if retry else "failed",
@@ -118,6 +123,7 @@ def main():
     recovered = board.recover_events()
     log(f"Always-on crew started. Checking {INBOX.name}/ every {CHECK_SECONDS}s, "
         f"daily cap ${DAILY_BUDGET_USD:.2f} (${board.spent_today():.4f} spent today)."
+        + (" Using the general pipeline." if RUNNER is pipeline else "")
         + (" Gemini second review is on." if USE_GEMINI else "")
         + (" A briefing follows each piece of work." if BRIEF_AFTER_WORK else ""))
     if interrupted_runs:
@@ -157,4 +163,8 @@ def main():
 if __name__ == "__main__":
     USE_GEMINI = "--gemini" in sys.argv[1:]
     BRIEF_AFTER_WORK = "--brief" in sys.argv[1:]
+    if "--pipeline" in sys.argv[1:]:
+        RUNNER = pipeline
+    if "--daily-budget" in sys.argv[1:]:
+        DAILY_BUDGET_USD = float(sys.argv[sys.argv.index("--daily-budget") + 1])
     main()

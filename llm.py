@@ -8,6 +8,7 @@
 """
 
 import json
+import threading
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
@@ -37,18 +38,45 @@ def _stop(run_id, reason):
     raise BudgetExceeded(reason)
 
 
-def _call(run_id, agent, prompt, system, model, max_tokens, task_id, **extra):
-    """One model call with the budget check before it and cost tracking after it."""
-    budget = _budget(run_id)
-    spent = board.run_cost(run_id)
+# Money set aside for calls that are in flight. Agents can run in parallel, so every call
+# reserves its worst case before it starts and gives it back once its real cost is on the
+# board. Without this, several calls could each pass the budget check and together overshoot.
+_reserved = {}
+_reserve_lock = threading.Lock()
 
+
+def reserve(run_id, agent, worst_case):
+    """Set aside `worst_case` dollars for one call, or stop the run if they aren't there."""
+    refusal = None
+    with _reserve_lock:
+        if board.run_status(run_id) == "stopped_budget":
+            refusal = "The run has already been stopped by its budget."
+        else:
+            budget = _budget(run_id)
+            spent = board.run_cost(run_id)
+            in_flight = _reserved.get(run_id, 0.0)
+            if spent + in_flight + worst_case > budget:
+                money = dashboard._money
+                left = money(max(0.0, budget - spent - in_flight))
+                refusal = f"{agent} needs up to {money(worst_case)}, but only {left} is left."
+            else:
+                _reserved[run_id] = in_flight + worst_case
+    if refusal:
+        _stop(run_id, refusal)  # raises BudgetExceeded
+
+
+def release(run_id, worst_case):
+    with _reserve_lock:
+        _reserved[run_id] = max(0.0, _reserved.get(run_id, 0.0) - worst_case)
+
+
+def _call(run_id, agent, prompt, system, model, max_tokens, task_id, reserve_extra=0.0, **extra):
+    """One model call with the budget check before it and cost tracking after it."""
     # Worst case for this call: roughly 1 token per 3 characters in, and max_tokens out.
     in_chars = len(prompt) + len(system or "") + len(json.dumps(extra.get("tools", "")))
     worst_case = board.cost_of(model, in_chars // 3 + (400 if "tools" in extra else 0), max_tokens)
-    if spent + worst_case > budget:
-        money = dashboard._money
-        left = money(budget - spent)
-        _stop(run_id, f"{agent} needs up to {money(worst_case)}, but only {left} is left.")
+    worst_case += reserve_extra
+    reserve(run_id, agent, worst_case)
 
     request = {
         "model": model,
@@ -58,10 +86,14 @@ def _call(run_id, agent, prompt, system, model, max_tokens, task_id, **extra):
     }
     if system:
         request["system"] = system
-    response = _client.messages.create(**request)
-
-    board.record_call(run_id, agent, model, response.usage.input_tokens,
-                      response.usage.output_tokens, task_id=task_id)
+    try:
+        response = _client.messages.create(**request)
+        # Record the real cost before giving the reservation back, so the money is always
+        # counted either as reserved or as spent.
+        board.record_call(run_id, agent, model, response.usage.input_tokens,
+                          response.usage.output_tokens, task_id=task_id)
+    finally:
+        release(run_id, worst_case)
     dashboard.render(run_id)
     return response
 
@@ -86,6 +118,48 @@ def ask_json(run_id, agent, prompt, schema, *, system=None, model=SMART,
         if block.type == "tool_use":
             return block.input
     raise ValueError("No structured answer in the reply.")
+
+
+SEARCH_COST_USD = 0.01   # assumed price per web search: check Anthropic's pricing page
+WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search"}
+
+
+def _field(item, name):
+    """Read a field from an SDK object or a plain dict."""
+    return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+
+def search_results(response):
+    """The pages a web-search reply found, as [{"url", "title"}] in order, without repeats."""
+    found, seen = [], set()
+    for block in response.content:
+        if _field(block, "type") != "web_search_tool_result":
+            continue
+        content = _field(block, "content")
+        if not isinstance(content, list):
+            continue  # an error from the search tool, not a list of pages
+        for item in content:
+            url = _field(item, "url")
+            if url and url not in seen:
+                seen.add(url)
+                found.append({"url": url, "title": _field(item, "title") or ""})
+    return found
+
+
+def ask_search(run_id, agent, prompt, *, system=None, model=FAST, max_tokens=800,
+               task_id=None, max_uses=3):
+    """Let Claude search the web (Anthropic's web search tool). Returns
+    {"text": the reply, "pages": [{"url", "title"}]}. Each search is recorded as a cost on
+    the board. Raises whatever the API raises if the tool isn't available on this key."""
+    tool = {**WEB_SEARCH_TOOL, "max_uses": max_uses}
+    response = _call(run_id, agent, prompt, system, model, max_tokens, task_id,
+                     reserve_extra=SEARCH_COST_USD * max_uses, tools=[tool])
+    used = _field(_field(response.usage, "server_tool_use"), "web_search_requests") or 0
+    if used:
+        board.record_call(run_id, agent, "web-search", int(used), 0, task_id=task_id)
+        dashboard.render(run_id)
+    text = "".join(b.text for b in response.content if _field(b, "type") == "text")
+    return {"text": text, "pages": search_results(response)}
 
 
 if __name__ == "__main__":

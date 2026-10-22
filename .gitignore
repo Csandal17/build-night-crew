@@ -223,3 +223,8 @@ dashboard.html
 dashboard_data.js
 output/
 inbox/
+# general pipeline: each run's fetched sources
+workspace/
+dashboard.html.*.tmp
+dashboard_data.js.*.tmp
+alerts/

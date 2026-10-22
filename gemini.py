@@ -11,6 +11,7 @@ Set GEMINI_MODEL in .env to use a different model.
 
 import json
 import os
+import threading
 import time
 
 import httpx
@@ -26,6 +27,9 @@ MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 # Used only when MODEL is overloaded (Google's 503 "high demand") after the retries below.
 FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
 RETRY_WAITS = (5, 15)  # seconds to wait before each retry while Google is busy
+# Parallel agents share one Gemini key, and the free tier is rate-limited, so only a few
+# requests are allowed in flight at once.
+_GATE = threading.Semaphore(int(os.getenv("GEMINI_MAX_CONCURRENT", "2")))
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
@@ -60,15 +64,16 @@ def _post(model, body):
     roughly 10 requests a minute), wait and retry: after 5 seconds, then 15."""
     url = API_URL.format(model=model)
     headers = {"x-goog-api-key": _api_key(), "Content-Type": "application/json"}
-    for wait in (*RETRY_WAITS, None):
-        response = httpx.post(url, headers=headers, json=body, timeout=90.0)
-        if response.status_code == 200:
-            return response.json()
-        if response.status_code not in (429, 500, 503):
-            raise RuntimeError(f"Gemini returned {response.status_code}: {_message(response)}")
-        if wait is None:
-            raise GeminiBusy(f"Gemini returned {response.status_code}: {_message(response)}")
-        time.sleep(wait)
+    with _GATE:
+        for wait in (*RETRY_WAITS, None):
+            response = httpx.post(url, headers=headers, json=body, timeout=90.0)
+            if response.status_code == 200:
+                return response.json()
+            if response.status_code not in (429, 500, 503):
+                raise RuntimeError(f"Gemini returned {response.status_code}: {_message(response)}")
+            if wait is None:
+                raise GeminiBusy(f"Gemini returned {response.status_code}: {_message(response)}")
+            time.sleep(wait)
 
 
 def ask_json(run_id, agent, prompt, schema, *, system=None, model=MODEL,
@@ -85,14 +90,9 @@ def ask_json(run_id, agent, prompt, schema, *, system=None, model=MODEL,
 
 
 def _ask_json(run_id, agent, prompt, schema, system, model, max_tokens, task_id):
-    budget = llm._budget(run_id)
-    spent = board.run_cost(run_id)
     in_chars = len(prompt) + len(system or "") + len(json.dumps(schema))
     worst_case = board.cost_of(model, in_chars // 3, max_tokens)  # thinking counts as output
-    if spent + worst_case > budget:
-        money = dashboard._money
-        llm._stop(run_id, f"{agent} needs up to {money(worst_case)}, "
-                          f"but only {money(budget - spent)} is left.")
+    llm.reserve(run_id, agent, worst_case)  # same budget rule as Claude, safe in parallel
 
     body = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -105,12 +105,14 @@ def _ask_json(run_id, agent, prompt, schema, system, model, max_tokens, task_id)
     }
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
-    data = _post(model, body)
-
-    usage = data.get("usageMetadata", {})
-    output_tokens = usage.get("candidatesTokenCount", 0) + usage.get("thoughtsTokenCount", 0)
-    board.record_call(run_id, agent, model, usage.get("promptTokenCount", 0),
-                      output_tokens, task_id=task_id)
+    try:
+        data = _post(model, body)
+        usage = data.get("usageMetadata", {})
+        output_tokens = usage.get("candidatesTokenCount", 0) + usage.get("thoughtsTokenCount", 0)
+        board.record_call(run_id, agent, model, usage.get("promptTokenCount", 0),
+                          output_tokens, task_id=task_id)
+    finally:
+        llm.release(run_id, worst_case)
     dashboard.render(run_id)
 
     candidate = (data.get("candidates") or [{}])[0]

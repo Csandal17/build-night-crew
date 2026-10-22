@@ -4,7 +4,9 @@ It survives restarts, so work is never lost if the script stops,
 and it records the cost of every model call for the dashboard.
 """
 
+import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,6 +23,9 @@ PRICES = {
     # a paid key. Thinking tokens are counted as output, as Google bills them.
     "gemini-3.8-flash": (0.75, 3.75),
     "gemini-2.5-flash": (0.30, 2.50),
+    # Web search is billed per search, not per token. It is recorded as one "input token"
+    # per search at $0.01 each (an assumed price: check Anthropic's pricing page).
+    "web-search": (10000.0, 0.0),
 }
 
 SCHEMA = """
@@ -41,7 +46,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     result TEXT,
     review_notes TEXT,
     attempts INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    task_type TEXT NOT NULL DEFAULT 'claim',
+    depends_on TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS calls (
     id INTEGER PRIMARY KEY,
@@ -73,19 +80,59 @@ CREATE TABLE IF NOT EXISTS briefings (
     characters INTEGER NOT NULL,
     audio_path TEXT
 );
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES runs(id),
+    task_id INTEGER,
+    sender TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS message_reads (
+    message_id INTEGER NOT NULL REFERENCES messages(id),
+    agent TEXT NOT NULL,
+    PRIMARY KEY (message_id, agent)
+);
 """
 
-TASK_FIELDS = {"owner", "status", "result", "review_notes", "attempts"}
+TASK_FIELDS = {"owner", "status", "result", "review_notes", "attempts", "task_type", "depends_on"}
 
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+_ready = set()           # database files whose schema has been set up in this process
+_ready_lock = threading.Lock()
+
+
+def _migrate(conn):
+    """Add columns that older boards don't have, so an existing board.db keeps working."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(tasks)")}
+    if "task_type" not in columns:
+        conn.execute("ALTER TABLE tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'claim'")
+    if "depends_on" not in columns:
+        conn.execute("ALTER TABLE tasks ADD COLUMN depends_on TEXT NOT NULL DEFAULT '[]'")
+    conn.commit()
+
+
 def _connect():
-    conn = sqlite3.connect(DB_PATH)
+    """A new connection. Several agents may write at once, so wait up to 30 seconds for a
+    lock instead of failing. The schema is set up once per database file, not on every call."""
+    key = str(DB_PATH)
+    if not DB_PATH.exists():
+        _ready.discard(key)  # a deleted board.db starts fresh
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
+    conn.execute("PRAGMA busy_timeout = 30000")
+    if key not in _ready:
+        with _ready_lock:
+            if key not in _ready:
+                conn.executescript(SCHEMA)
+                _migrate(conn)
+                _ready.add(key)
     return conn
 
 
@@ -130,10 +177,11 @@ def finish_run(run_id, status="completed"):
     )
 
 
-def add_task(run_id, title, owner=None):
+def add_task(run_id, title, owner=None, task_type="claim", depends_on=None):
     return _execute(
-        "INSERT INTO tasks (run_id, title, owner, updated_at) VALUES (?, ?, ?, ?)",
-        (run_id, title, owner, _now()),
+        "INSERT INTO tasks (run_id, title, owner, updated_at, task_type, depends_on) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (run_id, title, owner, _now(), task_type, json.dumps(list(depends_on or []))),
     )
 
 
@@ -141,6 +189,8 @@ def update_task(task_id, **fields):
     unknown = set(fields) - TASK_FIELDS
     if unknown:
         raise ValueError(f"Unknown task fields: {unknown}")
+    if "depends_on" in fields and not isinstance(fields["depends_on"], str):
+        fields["depends_on"] = json.dumps(list(fields["depends_on"]))
     fields["updated_at"] = _now()
     assignments = ", ".join(f"{name} = ?" for name in fields)
     _execute(f"UPDATE tasks SET {assignments} WHERE id = ?", (*fields.values(), task_id))
@@ -155,6 +205,11 @@ def record_call(run_id, agent, model, input_tokens, output_tokens, task_id=None)
         (run_id, task_id, agent, model, input_tokens, output_tokens, cost, _now()),
     )
     return cost
+
+
+def run_status(run_id):
+    rows = _fetch("SELECT status FROM runs WHERE id = ?", (run_id,))
+    return rows[0]["status"] if rows else None
 
 
 def run_cost(run_id):
@@ -261,6 +316,72 @@ def events_since(since=None, limit=5):
         rows = _fetch("SELECT * FROM events WHERE updated_at > ? "
                       "ORDER BY updated_at DESC, id DESC LIMIT ?", (since, limit))
     return list(reversed(rows))
+
+
+# ---------- messages: agents talking to each other on the board ----------
+
+MESSAGE_KINDS = {"request", "offer", "challenge", "reply", "escalate", "say"}
+MAX_MESSAGES_PER_RUN = 60   # a hard cap, so chatter can't run away
+MAX_MESSAGE_CHARS = 600
+
+
+def post_message(run_id, sender, recipient, kind, text, task_id=None):
+    """Post a message to one agent (or "all"). Returns its id, or None if the run has
+    reached its message cap. The cap check and the insert happen together, so agents
+    posting at the same moment can't go over it."""
+    if kind not in MESSAGE_KINDS:
+        raise ValueError(f"Unknown message kind {kind!r}. Use one of {sorted(MESSAGE_KINDS)}.")
+    text = " ".join(str(text).split())[:MAX_MESSAGE_CHARS]
+    if not text:
+        return None
+    conn = _connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id = ?", (run_id,)).fetchone()[0]
+        if count >= MAX_MESSAGES_PER_RUN:
+            conn.rollback()
+            return None
+        cur = conn.execute(
+            "INSERT INTO messages (run_id, task_id, sender, recipient, kind, text, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (run_id, task_id, sender, recipient, kind, text, _now()),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def unread_messages(run_id, agent, limit=6):
+    """Messages addressed to this agent (or to "all") that it hasn't read yet, oldest first.
+    An agent never sees its own messages."""
+    return _fetch(
+        """SELECT * FROM messages
+           WHERE run_id = ? AND sender != ? AND recipient IN (?, 'all')
+             AND id NOT IN (SELECT message_id FROM message_reads WHERE agent = ?)
+           ORDER BY id LIMIT ?""",
+        (run_id, agent, agent, agent, limit),
+    )
+
+
+def mark_read(agent, message_ids):
+    conn = _connect()
+    try:
+        conn.executemany("INSERT OR IGNORE INTO message_reads (message_id, agent) VALUES (?, ?)",
+                         [(mid, agent) for mid in message_ids])
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def messages_for_run(run_id, limit=30):
+    """The latest messages in a run, oldest first, for the dashboard feed."""
+    rows = _fetch("SELECT * FROM messages WHERE run_id = ? ORDER BY id DESC LIMIT ?", (run_id, limit))
+    return list(reversed(rows))
+
+
+def message_count(run_id):
+    return _fetch("SELECT COUNT(*) AS n FROM messages WHERE run_id = ?", (run_id,))[0]["n"]
 
 
 # ---------- briefings: the spoken handovers made by brief.py ----------

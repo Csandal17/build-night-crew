@@ -164,8 +164,13 @@ def _item_lines(item, tally):
     several = len(s["tasks"]) > 1
     for task in s["tasks"]:
         label = _topic(task["title"]) if several else name
+        kind = task.get("task_type") or "claim"
+        if kind == "research" and task["status"] == "done":
+            continue  # finding sources went fine: only the written sections are worth saying aloud
         head, _, summary = (task["result"] or "").partition(": ")
         verdict = head.replace("PLANTED MISTAKE, ", "").strip().lower() or "no verdict"
+        if kind != "claim":  # pipeline tasks have no verdict: their result is the text itself
+            verdict, summary = {"write": "written"}.get(kind, kind), task["result"] or ""
         review = task["review_notes"] or ""
         if task["status"] == "done":
             tally["passed"] += 1

@@ -6,7 +6,9 @@ new content without reloading, so it updates smoothly while the crew runs.
 """
 
 import json
+import os
 import sys
+import threading
 import webbrowser
 from datetime import datetime
 from html import escape
@@ -33,7 +35,16 @@ STATUS_COLOURS = {
     "needs_human": "#E98A4E",
     "failed": "#E98A4E",
     "stopped_budget": "#E98A4E",
+    "blocked": "#C5D1DE",
+    "stopped": "#E98A4E",
 }
+
+KIND_COLOURS = {   # message kinds in the feed
+    "request": "#F2B33D", "offer": "#7FB77E", "challenge": "#E98A4E",
+    "reply": "#8FB3D3", "escalate": "#E98A4E", "say": "#C5D1DE",
+}
+
+_render_lock = threading.RLock()   # agents running in parallel all call render()
 
 CSS = """
 :root {
@@ -102,6 +113,12 @@ h2 { font-size: 32px; font-weight: 800; margin: 0 0 24px; }
   display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: center; }
 .event .label { font-weight: 700; }
 .event p { grid-column: 1 / -1; margin: 0; color: var(--text); font-size: 16px; }
+.feed { display: grid; gap: 10px; }
+.msg { background: var(--card); border-radius: 8px; padding: 12px 16px; display: grid;
+  grid-template-columns: 1fr auto; gap: 2px 14px; align-items: baseline; }
+.msg .who { font-family: 'Bricolage Grotesque', 'Avenir Next', 'Segoe UI', sans-serif; font-weight: 700; font-size: 15px; }
+.msg .who span { color: var(--muted); font-weight: 600; }
+.msg p { grid-column: 1 / -1; margin: 0; font-size: 16px; color: var(--text); }
 footer { margin-top: 64px; background: var(--navy); color: #DCE4EF; padding: 24px 0; font-size: 15px; }
 """
 
@@ -172,6 +189,41 @@ def _inbox_html():
   <div class="inbox">{cards}</div></section>"""
 
 
+def _feed_html(run_id):
+    """The live message feed: agents asking, offering, challenging and replying to each other."""
+    messages = board.messages_for_run(run_id, limit=24)
+    if not messages:
+        return ""
+    cards = "".join(
+        f"""<div class="msg">
+          <span class="who">{escape(m['sender'])} <span>to {escape(m['recipient'])}</span></span>
+          <span class="pill" style="background:{KIND_COLOURS.get(m['kind'], '#C5D1DE')}">{escape(m['kind'])}</span>
+          <p>{escape(_clip(m['text'], 320))}</p>
+        </div>"""
+        for m in messages
+    )
+    total = board.message_count(run_id)
+    note = f"{total} messages" + (f", latest {len(messages)} shown" if total > len(messages) else "")
+    return f"""<section><h2>Message feed</h2><p class="watcher">{escape(note)}</p>
+  <div class="feed">{cards}</div></section>"""
+
+
+def _task_meta(t, titles):
+    """Owner, type, attempts and, for waiting tasks, what they are waiting on."""
+    parts = [escape(t['owner'] or 'unassigned')]
+    if t.get('task_type') and t['task_type'] != 'claim':
+        parts.append(escape(t['task_type']))
+    parts.append(f"attempts {t['attempts']}")
+    try:
+        deps = json.loads(t.get('depends_on') or '[]')
+    except ValueError:
+        deps = []
+    waiting = [titles[d] for d in deps if d in titles]
+    if waiting and t['status'] in ('queued', 'blocked'):
+        parts.append("waiting for " + escape(_clip(", ".join(waiting), 90)))
+    return " · ".join(parts)
+
+
 def _body(run_id=None):
     """Build the page content (everything inside the body) for one run."""
     runs = board.all_runs()
@@ -205,11 +257,12 @@ def _body(run_id=None):
             return f"<p><strong>Not verified.</strong> Last answer, which did not pass review: {text}</p>"
         return f"<p>{text}</p>"
 
+    titles = {t["id"]: t["title"] for t in s["tasks"]}
     tasks_html = "".join(
         f"""<div class="task">
           <h3>{escape(t['title'])}</h3>
           {_pill(t['status'])}
-          <p class="meta">{escape(t['owner'] or 'unassigned')} · attempts {t['attempts']} · {_money(task_costs.get(t['id'], 0))}</p>
+          <p class="meta">{_task_meta(t, titles)} · {_money(task_costs.get(t['id'], 0))}</p>
           {_result_html(t)}
           {f"<p class='meta'>Review: {escape(_clip(t['review_notes'], 280))}</p>" if t['review_notes'] else ''}
         </div>"""
@@ -263,6 +316,7 @@ def _body(run_id=None):
   {inbox_html}
   <section><h2>Cost by agent</h2>{agents_html}</section>
   <section><h2>Task board</h2><div class="tasks">{tasks_html}</div></section>
+  {_feed_html(run_id)}
   <section><h2>Every run</h2><div class="runs">{runs_html}</div></section>
 </div>
 <footer><div class="wrap">build-night-crew · updated {datetime.now():%H:%M:%S} · live</div></footer>"""
@@ -288,12 +342,24 @@ def _js(value):
     return json.dumps(value).replace("</", "<\\/")
 
 
+def _write_atomic(path, text):
+    """Write to a temporary file and swap it in, so the open page never reads half a file."""
+    tmp = path.with_name(f"{path.name}.{threading.get_ident()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def render(run_id=None):
-    """Write the latest content to both files. Call this after every step."""
+    """Write the latest content to both files. Call this after every step.
+    Safe to call from several agents at once."""
+    with _render_lock:
+        return _render(run_id)
+
+
+def _render(run_id=None):
     body = _body(run_id)
     briefing = _briefing()
-    DATA_PATH.write_text(f"window.renderDash({json.dumps(body)}, {json.dumps(briefing)});",
-                         encoding="utf-8")
+    _write_atomic(DATA_PATH, f"window.renderDash({json.dumps(body)}, {json.dumps(briefing)});")
     page = f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -420,7 +486,7 @@ def render(run_id=None):
   }}, 1000);
 </script>
 </body></html>"""
-    OUT_PATH.write_text(page, encoding="utf-8")
+    _write_atomic(OUT_PATH, page)
     return OUT_PATH
 
 if __name__ == "__main__":
