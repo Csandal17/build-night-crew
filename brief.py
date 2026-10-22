@@ -109,22 +109,51 @@ def _lower_first(text):
     return text[:1].lower() + text[1:]
 
 
-def _event_items(event, tally):
+def _run_name(goal):
+    """A run's title without its tags: 'Evidence check: three claims · Challenge' -> 'Evidence check: three claims'"""
+    return goal.split(" · ")[0].strip()
+
+
+def _items_since(since):
+    """Everything worth briefing on since `since`, oldest first, as (status, item) pairs:
+    every finished run (started by crew.py or by the inbox watcher), plus inbox work that
+    hasn't reached a finished run yet. With no `since`, everything there is."""
+    where = " WHERE COALESCE(finished_at, started_at) > ?" if since else ""
+    runs = board._fetch("SELECT * FROM runs" + where + " ORDER BY id", (since,) if since else ())
+    from_inbox = {e["run_id"]: e for e in board._fetch("SELECT * FROM events WHERE run_id IS NOT NULL")}
+    items = []
+    for run in runs:
+        # Running, interrupted and crashed runs are told through their inbox entry instead.
+        if run["status"] in ("running", "interrupted", "failed"):
+            continue
+        event = from_inbox.get(run["id"])
+        name = _name(event["source"]) if event else _run_name(run["goal"])
+        status = "stopped" if run["status"] == "stopped_budget" else "done"
+        items.append((run["finished_at"] or run["started_at"], status, {"run": run, "name": name}))
+    pending = board._fetch(
+        "SELECT * FROM events WHERE status IN ('waiting', 'running', 'failed')"
+        + (" AND updated_at > ?" if since else "") + " ORDER BY id", (since,) if since else ())
+    for event in pending:
+        items.append((event["updated_at"], event["status"], {"event": event, "name": _name(event["source"])}))
+    items.sort(key=lambda item: item[0])
+    return [(status, item) for _, status, item in items]
+
+
+def _item_lines(item, tally):
     """What happened to one piece of work.
     Returns (claims, notes, needs_you): claims are (label, verdict, summary) for each
     claim that passed review; notes are lines worth saying on their own (something sent
     back, something that needs you, work that failed or is still queued)."""
-    name = _name(event["source"])
-    if event["status"] == "failed":
-        return [], [("narrator", f"{name} could not be run. {_sentence(event['error'])}")], True
-    if event["status"] == "running":
-        return [], [("narrator", f"{name} is being checked right now.")], False
-    if event["status"] == "waiting":
+    name = item["name"]
+    event = item.get("event")
+    if event:
+        if event["status"] == "failed":
+            return [], [("narrator", f"{name} could not be run. {_sentence(event['error'])}")], True
+        if event["status"] == "running":
+            return [], [("narrator", f"{name} is being checked right now.")], False
         return [], [("narrator", f"{name} is waiting in the queue.")], False
-    if not event["run_id"]:
-        return [], [], False
 
-    s = board.summary(event["run_id"])
+    s = board.summary(item["run"]["id"])
     if s["run"]["status"] == "stopped_budget":
         return [], [("narrator", f"{name} stopped at its budget cap before finishing.")], True
 
@@ -144,8 +173,12 @@ def _event_items(event, tally):
                 caught = review.split(": ", 1)[1]
                 for ending in (" Both reviewers passed it.", " Fixed and passed."):
                     caught = caught.replace(ending, "")
-                notes.append(("reviewer", f"I sent {_lower_first(label)} back first. "
-                                          f"{_sentence(caught, 140)} It was fixed, and then it passed."))
+                if review.startswith("Planted"):
+                    opening = f"A mistake was planted in {_lower_first(label)} on purpose, to test me. I caught it."
+                else:
+                    opening = f"I sent {_lower_first(label)} back first."
+                notes.append(("reviewer", f"{opening} {_sentence(caught, 140)} "
+                                          "It was fixed, and then it passed."))
         else:
             needs_you = True
             reason = review.split(": ", 1)[-1] if review else "The reviewers could not pass it."
@@ -184,31 +217,31 @@ def _review_summary(tally):
     return "I passed it." if passed == 1 else f"I passed all {passed} verdicts."
 
 
-def _compose(events, since, counts, detail):
-    """The whole script for these events, as a list of (speaker, text)."""
-    changed = sum(counts.values())
-    labels = (("done", "finished"), ("running", "in progress"),
+def _compose(items, since, statuses, detail):
+    """The whole script for these items, as a list of (speaker, text)."""
+    changed = len(statuses)
+    labels = (("done", "finished"), ("stopped", "stopped at the budget cap"), ("running", "in progress"),
               ("waiting", "waiting"), ("failed", "could not run"))
-    parts = [f"{counts[k]} {label}" for k, label in labels if counts.get(k)]
+    parts = [f"{statuses.count(k)} {label}" for k, label in labels if statuses.count(k)]
     opener = f"Here's your crew briefing. Since {_clock(since)}, " if since else "Here's your crew briefing. "
     work = _count(changed, "piece of work", "pieces of work")
-    opener += f"{work} finished." if counts.get("done") == changed else f"{work} changed: {_list(parts)}."
+    opener += f"{work} finished." if statuses.count("done") == changed else f"{work} changed: {_list(parts)}."
 
     claims, notes, needs_you = [], [], []
     tally = {"passed": 0, "both": 0}
-    for event in events:
-        event_claims, event_notes, needs = _event_items(event, tally)
-        claims += event_claims
-        notes += event_notes
+    for item in items:
+        item_claims, item_notes, needs = _item_lines(item, tally)
+        claims += item_claims
+        notes += item_notes
         if needs:
-            needs_you.append(_name(event["source"]).lower())
+            needs_you.append(_lower_first(item["name"]))
 
     lines = [("narrator", opener)] + _claim_lines(claims, detail) + notes
     summary = _review_summary(tally)
     if summary:
         lines.append(("reviewer", summary))
-    if changed > len(events):
-        lines.append(("narrator", f"There's {_count(changed - len(events), 'more item', 'more items')} "
+    if changed > len(items):
+        lines.append(("narrator", f"There's {_count(changed - len(items), 'more item', 'more items')} "
                                   "on the dashboard."))
     lines.append(("narrator", f"Spent today: {_cents(board.spent_today())}." + (
         f" {_count(len(needs_you), 'item needs', 'items need')} your decision: {_list(needs_you)}."
@@ -220,18 +253,14 @@ def build_script(show_all=False, detail=False):
     """Returns (lines, since) where lines is a list of (speaker, text)."""
     last = None if show_all else board.last_briefing()
     since = last["created_at"] if last else None
-    events = board.events_since(since, limit=MAX_ITEMS)
-    if not events:
+    everything = _items_since(since)
+    if not everything:
         return [], since
-    rows = board._fetch(
-        "SELECT status, COUNT(*) AS n FROM events"
-        + (" WHERE updated_at > ?" if since else "") + " GROUP BY status",
-        (since,) if since else (),
-    )
-    counts = {row["status"]: row["n"] for row in rows}
+    statuses = [status for status, _ in everything]
+    items = [item for _, item in everything][-MAX_ITEMS:]
     # Keep under ElevenLabs' limit: if it's too long, leave the oldest work for the dashboard.
-    for keep in range(len(events), 0, -1):
-        lines = _compose(events[-keep:], since, counts, detail)
+    for keep in range(len(items), 0, -1):
+        lines = _compose(items[-keep:], since, statuses, detail)
         if sum(len(text) for _, text in lines) <= MAX_CHARS:
             break
     return lines, since
