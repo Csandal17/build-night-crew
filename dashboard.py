@@ -196,12 +196,21 @@ def _body(run_id=None):
         for a in s["by_agent"]
     ) or "<p class='meta'>No model calls yet.</p>"
 
+    def _result_html(t):
+        """A held task's last answer never passed review, so it's labelled as unverified."""
+        if not t["result"]:
+            return ""
+        text = escape(_clip(t["result"], 320))
+        if t["status"] == "needs_human":
+            return f"<p><strong>Not verified.</strong> Last answer, which did not pass review: {text}</p>"
+        return f"<p>{text}</p>"
+
     tasks_html = "".join(
         f"""<div class="task">
           <h3>{escape(t['title'])}</h3>
           {_pill(t['status'])}
           <p class="meta">{escape(t['owner'] or 'unassigned')} · attempts {t['attempts']} · {_money(task_costs.get(t['id'], 0))}</p>
-          {f"<p>{escape(_clip(t['result'], 320))}</p>" if t['result'] else ''}
+          {_result_html(t)}
           {f"<p class='meta'>Review: {escape(_clip(t['review_notes'], 280))}</p>" if t['review_notes'] else ''}
         </div>"""
         for t in s["tasks"]
