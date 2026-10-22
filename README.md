@@ -1,11 +1,12 @@
 # build-night-crew
 
-Pre-tested starter for Moonfire Build Night (22 Oct 2026): Claude agents with a shared task board, a per-run budget cap and live cost tracking. Work in progress.
+A crew of AI agents that check each other's work, with a shared task board, a hard budget on every run and live cost tracking per agent. Built for Moonfire Build Night (22 Oct 2026, Sparkles Cloud Crew track).
 
 On top of that base:
 - **Always-on mode:** the crew waits for work in an inbox, wakes only when something arrives, recovers after a restart, and keeps to a daily spending cap.
 - **An independent second reviewer:** Gemini re-checks every claim Claude passes, and a claim only counts if both agree.
 - **SRE crew (Sparkles track):** a production alert wakes the crew, which fixes the bug, proves the fix with hidden tests and two reviewers, and leaves it on a branch for the engineer on call.
+- **Crew feed:** a live panel on the dashboard showing what the agents say to each other, with challenges highlighted.
 - **Brief me:** a spoken handover of what the crew did while you were away, written by code from the task board and read by ElevenLabs in two voices.
 
 ![The live dashboard: a run receipt with spend against budget and review results, and the always-on inbox below](docs/dashboard.png)
@@ -70,7 +71,7 @@ Without `--gemini`, a pass from the Claude reviewer goes straight to Done. In ch
 | Challenge mode with Gemini: a mistake planted on purpose | Claude caught it, the worker fixed it on attempt 2, Gemini agreed with the fix |
 | `watch.py --gemini --brief`: a file dropped into `inbox/` | Checked in 10 seconds (about 1p), a two-voice briefing appeared in the dashboard's player 9 seconds later and played there |
 
-Precisely what "always-on" means here: the watcher runs on one computer and waits for files in a local folder. It isn't yet deployed as a hosted service; running it in a cloud sandbox is the next step (see the experimental `sparkles` branch).
+Precisely what "always-on" means here: the watcher runs on one computer and waits for files in a local folder. Today every agent runs locally and calls Claude, Gemini and ElevenLabs in the cloud; nothing yet runs in a cloud sandbox. Moving the agents into Sparkles cloud sandboxes is the next step (see "What's next" below).
 
 ## Requirements
 
@@ -198,7 +199,7 @@ cp sre/alerts/checkout-keyerror.json inbox/             # terminal 2: production
 - **Sparkles:** `--sparkles` makes a Sparkles coding agent the fixer (`sparkles_agent.py`). Moving to cloud sandboxes means changing `sparkles_agent.run()` for the fixer and `run_tests()` in `sre_crew.py` for the tester; nothing else changes.
 - **Pull requests:** `--pr` pushes the fix branch and opens a draft pull request if the project has a GitHub remote and `gh` is installed. Without it, the pull request text is saved in `output/`.
 
-Tested offline with stand-in model calls (35 checks): the planted shortcut caught and fixed, edits to tests ignored, a fix that never passes held with nothing committed, Gemini unavailable held as not verified, alerts and claims routed by the watcher.
+Tested offline with stand-in model calls (36 checks; a run with real API calls is next): the planted shortcut caught and fixed, edits to tests ignored, a fix that never passes held with nothing committed, Gemini unavailable held as not verified, alerts and claims routed by the watcher.
 
 ## Crew feed: watch the agents talk
 
@@ -238,6 +239,13 @@ Kinds: `alert`, `evidence`, `hypothesis`, `fix`, `challenge`, `reply`, `agree`, 
 - `feed.py`: the crew feed. Agents post messages; the dashboard shows the conversation live.
 
 The first three files work for any crew. `crew.py` and `sources/` are the example to adapt or swap out.
+
+## What's next
+
+- **Sparkles cloud sandboxes.** All of the SRE crew's real work goes through two functions: `sparkles_agent.run()` for the fixer and `run_tests()` in `sre_crew.py` for the tester. Moving them into Sparkles cloud sandboxes, with the local version kept as a fallback, is the next step.
+- **A real Sentry alert.** The crew already reads Sentry's webhook JSON; connecting a real Sentry project is a small step after that.
+
+The team's version from the night (a general research pipeline, a Sentry receiver and a plan for a larger incident crew) is kept on the [`team-incident-crew`](https://github.com/Csandal17/build-night-crew/tree/team-incident-crew) branch.
 
 ## Licence
 

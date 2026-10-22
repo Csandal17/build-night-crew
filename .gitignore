@@ -223,3 +223,6 @@ dashboard.html
 dashboard_data.js
 output/
 inbox/
+
+# macOS
+.DS_Store
