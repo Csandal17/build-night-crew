@@ -5,7 +5,8 @@ only say what actually happened: what arrived, each verdict, what a reviewer sen
 and what needs your decision. ElevenLabs then reads it out in two voices: a narrator
 for the crew, and a second voice for the reviewers.
 
-Run:  uv run brief.py             (everything since your last briefing; plays on a Mac)
+Run:  uv run brief.py             (everything since your last briefing; plays on a Mac,
+                                   and appears in the dashboard's "Latest briefing" player)
       uv run brief.py --dry-run   (print the script only: free, no audio, nothing saved)
       uv run brief.py --all       (the latest few pieces of work, even if already briefed)
       uv run brief.py --detail    (one line per claim with its reason, instead of grouped by verdict)
@@ -15,6 +16,7 @@ Needs ELEVENLABS_API_KEY in .env. ElevenLabs charges by the character, and the s
 is capped at under 2,000 characters, so one briefing stays small.
 """
 
+import json
 import os
 import re
 import shutil
@@ -27,6 +29,7 @@ import httpx
 from dotenv import load_dotenv
 
 import board
+import dashboard
 
 load_dotenv()
 
@@ -318,8 +321,12 @@ def main(args):
     OUTPUT_DIR.mkdir(exist_ok=True)
     path = OUTPUT_DIR / f"briefing_{datetime.now():%Y%m%d_%H%M%S}.mp3"
     how = speak(lines, path)
+    # The script goes next to the audio, so the dashboard can show who says what.
+    path.with_suffix(".json").write_text(
+        json.dumps({"lines": lines, "characters": characters, "voices": how}), encoding="utf-8")
     board.add_briefing(characters, str(path.relative_to(HERE)))
-    print(f"Saved {path.relative_to(HERE)} ({how}).")
+    dashboard.render()  # the newest briefing appears in the dashboard's player
+    print(f"Saved {path.relative_to(HERE)} ({how}). It's also on the dashboard.")
     if "--no-play" not in args and shutil.which("afplay"):
         subprocess.run(["afplay", str(path)])
     return path

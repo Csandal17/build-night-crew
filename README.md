@@ -9,7 +9,7 @@ On top of that base:
 
 ![The live dashboard: a run receipt with spend against budget and review results, and the always-on inbox below](docs/dashboard.png)
 
-## Tested end to end (21 Oct 2026, real API calls)
+## Tested end to end (21 and 22 Oct 2026, real API calls)
 
 | What | Result |
 |---|---|
@@ -19,6 +19,8 @@ On top of that base:
 | Stopped mid-run with Ctrl+C, then restarted | The cut-off run was marked interrupted and the work redone from the start as attempt 2, all three claims passed |
 | The same file sent again | Ignored, nothing re-run |
 | Two-voice briefing | Played in two voices; wording tightened after listening |
+| Challenge mode with Gemini: a mistake planted on purpose | Claude caught it, the worker fixed it on attempt 2, Gemini agreed with the fix |
+| `watch.py --gemini --brief`: a file dropped into `inbox/` | Checked in 10 seconds (about 1p), a two-voice briefing appeared in the dashboard's player 9 seconds later and played there |
 
 Precisely what "always-on" means here: the watcher runs on one computer and waits for files in a local folder. It isn't yet deployed as a hosted service; running it in a cloud sandbox is the next step (see the experimental `sparkles` branch).
 
@@ -87,7 +89,7 @@ echo "Adults should consider taking a daily vitamin D supplement during autumn a
 #    Copy the same file under the same name again and nothing new runs.
 ```
 
-`uv run watch.py --gemini` gives every claim the second review too.
+`uv run watch.py --gemini` gives every claim the second review too, and `uv run watch.py --brief` makes a spoken briefing after each piece of work, ready to play on the dashboard. The options combine: `uv run watch.py --gemini --brief`.
 
 ## Brief me
 
@@ -98,6 +100,8 @@ uv run brief.py --detail    # one line per claim with its reason, instead of gro
 ```
 
 A spoken handover for when you've been away. The script is written by code from `board.db`, not by a model, so it only says what actually happened: what arrived, each verdict, what a reviewer sent back, and what needs your decision. ElevenLabs reads it in two voices, a narrator for the crew and a second voice for the reviewers (falling back to one voice if two-voice dialogue isn't available on your plan). Each briefing stays under 2,000 characters, and audio is saved to `output/`.
+
+The newest briefing also appears in a **Latest briefing** player on the dashboard (bottom left), with its script showing who says each line. The player sits outside the part of the page that refreshes, so a briefing keeps playing while the crew works, and a new one is tagged **New** until you press play. Browsers don't play sound on their own, so you press play.
 
 ## Sparkles writes the code, the crew checks it (experimental)
 

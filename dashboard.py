@@ -268,10 +268,32 @@ def _body(run_id=None):
 <footer><div class="wrap">build-night-crew · updated {datetime.now():%H:%M:%S} · live</div></footer>"""
 
 
+def _briefing():
+    """The newest spoken briefing (brief.py) for the player: its audio file and its script."""
+    latest = board.last_briefing()
+    if not latest or not latest["audio_path"]:
+        return None
+    lines = []
+    try:
+        script = (OUT_PATH.parent / latest["audio_path"]).with_suffix(".json")
+        lines = json.loads(script.read_text(encoding="utf-8")).get("lines", [])
+    except (OSError, ValueError):
+        pass  # briefings made before scripts were saved still get a player
+    return {"id": latest["id"], "audio": latest["audio_path"],
+            "when": _local_time(latest["created_at"]), "lines": lines}
+
+
+def _js(value):
+    """JSON that's safe to put inside a <script> tag."""
+    return json.dumps(value).replace("</", "<\\/")
+
+
 def render(run_id=None):
     """Write the latest content to both files. Call this after every step."""
     body = _body(run_id)
-    DATA_PATH.write_text(f"window.renderDash({json.dumps(body)});", encoding="utf-8")
+    briefing = _briefing()
+    DATA_PATH.write_text(f"window.renderDash({json.dumps(body)}, {json.dumps(briefing)});",
+                         encoding="utf-8")
     page = f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -292,21 +314,83 @@ def render(run_id=None):
   @keyframes glow {{ 0% {{ color: #F2B33D; }} 100% {{ color: #14213D; }} }}
   @media (prefers-reduced-motion: reduce) {{
     #live.ok .dot, .changed .spent {{ animation: none; }} }}
+  /* The latest spoken briefing. It sits outside #app, so refreshes never cut the audio off. */
+  #brief {{ position: fixed; left: 20px; bottom: 20px; z-index: 10; width: min(400px, calc(100vw - 40px));
+    background: #FFFFFF; color: #14213D; border-radius: 16px; padding: 14px 16px 12px;
+    box-shadow: 0 8px 24px rgba(5, 12, 30, 0.25); }}
+  #brief[hidden] {{ display: none; }}
+  #brief .head {{ display: flex; align-items: baseline; gap: 10px; font-family: 'Bricolage Grotesque', sans-serif; }}
+  #brief .head b {{ font-size: 16px; }}
+  #brief-when {{ font-size: 14px; color: #45526B; }}
+  #brief-new {{ display: none; margin-left: auto; background: #F2B33D; font-size: 13px; font-weight: 700;
+    border-radius: 22px; padding: 1px 10px; }}
+  #brief.fresh #brief-new {{ display: inline-block; }}
+  #brief audio {{ display: block; width: 100%; margin: 10px 0 6px; }}
+  #brief summary {{ cursor: pointer; font-family: 'Bricolage Grotesque', sans-serif; font-size: 14px;
+    font-weight: 700; color: #45526B; }}
+  #brief ol {{ list-style: none; padding: 0; margin: 8px 0 0; max-height: 40vh; overflow-y: auto;
+    font-size: 15px; line-height: 1.45; }}
+  #brief li {{ margin: 0 0 8px; }}
+  #brief li .who {{ display: block; font-family: 'Bricolage Grotesque', sans-serif; font-size: 13px;
+    font-weight: 700; text-transform: capitalize; color: #45526B; }}
+  #brief li.reviewer .who {{ color: #8A5A00; }}
+  body.has-brief {{ padding-bottom: 170px; }}
+  @media (max-width: 640px) {{ #brief {{ left: 12px; right: 12px; width: auto; bottom: 68px; }} }}
 </style>
 </head><body>
 <div id="app">{body}</div>
 <div id="live" class="ok"><span class="dot"></span><span id="live-text">Live</span></div>
+<section id="brief" aria-label="Latest spoken briefing" hidden>
+  <div class="head"><b>Latest briefing</b><span id="brief-when"></span><span id="brief-new">New</span></div>
+  <audio id="brief-audio" controls preload="none"></audio>
+  <details id="brief-script"><summary>Show script</summary><ol id="brief-lines"></ol></details>
+</section>
 <script>
   // Check for new content every few seconds and swap it in without reloading,
   // so the page never flashes and keeps its scroll position.
   var app = document.getElementById("app");
   var badge = document.getElementById("live");
   var badgeText = document.getElementById("live-text");
-  var current = {json.dumps(body).replace("</", "<\\/")};  // what's on screen now
+  var current = {_js(body)};  // what's on screen now
   var lastOk = Date.now();
   var failing = false;
 
-  window.renderDash = function (html) {{
+  // The briefing player only changes when a new briefing arrives, so playback isn't interrupted.
+  var briefBox = document.getElementById("brief");
+  var briefAudio = document.getElementById("brief-audio");
+  var briefScript = document.getElementById("brief-script");
+  var briefId = null;
+  var briefReady = false;  // after the first load, a new briefing gets a "New" tag
+
+  function showBrief(brief) {{
+    if (!brief) {{ briefBox.hidden = true; document.body.classList.remove("has-brief"); return; }}
+    if (brief.id === briefId) return;
+    briefId = brief.id;
+    briefAudio.src = brief.audio + "?v=" + brief.id;
+    document.getElementById("brief-when").textContent = brief.when;
+    var list = document.getElementById("brief-lines");
+    list.textContent = "";
+    brief.lines.forEach(function (line) {{
+      var item = document.createElement("li");
+      item.className = line[0];
+      var who = document.createElement("span");
+      who.className = "who";
+      who.textContent = line[0];
+      item.appendChild(who);
+      item.appendChild(document.createTextNode(line[1]));
+      list.appendChild(item);
+    }});
+    briefScript.hidden = brief.lines.length === 0;
+    briefBox.hidden = false;
+    document.body.classList.add("has-brief");
+    if (briefReady) briefBox.classList.add("fresh");
+  }}
+  briefAudio.addEventListener("play", function () {{ briefBox.classList.remove("fresh"); }});
+  showBrief({_js(briefing)});
+  briefReady = true;
+
+  window.renderDash = function (html, brief) {{
+    showBrief(brief);
     if (html === current) return;
     var firstLoad = current === null;
     current = html;
