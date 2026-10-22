@@ -125,3 +125,7 @@ Safety: the agent gets at most 6 turns and 5 minutes, may edit files but not run
 - `sparkles_demo.py`: one request from start to finish: Sparkles codes, the crew reviews, one revision, then done or a human.
 
 The first three files work for any crew. `crew.py` and `sources/` are the example to adapt or swap out.
+
+## Licence
+
+The code is MIT licensed (see `LICENSE`), so you're free to use and adapt it. The excerpts in `sources/` are short quotations from NHS web pages, not covered by that licence. Each file names its page and URL, and the text belongs to the NHS.
