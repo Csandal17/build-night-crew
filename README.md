@@ -7,6 +7,21 @@ On top of that base:
 - **An independent second reviewer:** Gemini re-checks every claim Claude passes, and a claim only counts if both agree.
 - **Brief me:** a spoken handover of what the crew did while you were away, written by code from the task board and read by ElevenLabs in two voices.
 
+![The live dashboard: a run receipt with spend against budget and review results, and the always-on inbox below](docs/dashboard.png)
+
+## Tested end to end (21 Oct 2026, real API calls)
+
+| What | Result |
+|---|---|
+| Key check: Claude, Gemini (event key, plus backup model), ElevenLabs | All OK |
+| Crew with Gemini as second reviewer, three claims | Gemini agreed on each; when Google returned "high demand", the claim was held as unverified, not passed. Retries and a backup model were added after this. |
+| Always-on: a file dropped into `inbox/` | Picked up within seconds, checked, back to waiting (about 1p) |
+| Stopped mid-run with Ctrl+C, then restarted | The cut-off run was marked interrupted and the work redone from the start as attempt 2, all three claims passed |
+| The same file sent again | Ignored, nothing re-run |
+| Two-voice briefing | Played in two voices; wording tightened after listening |
+
+Precisely what "always-on" means here: the watcher runs on one computer and waits for files in a local folder. It isn't yet deployed as a hosted service; running it in a cloud sandbox is the next step (see the experimental `sparkles` branch).
+
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/) (Python 3.12 is installed automatically)
