@@ -9,7 +9,7 @@ On top of that base:
 
 ![The live dashboard: a run receipt with spend against budget and review results, and the always-on inbox below](docs/dashboard.png)
 
-## Tested end to end (21 Oct 2026, real API calls)
+## Tested end to end (21 and 22 Oct 2026, real API calls)
 
 | What | Result |
 |---|---|
@@ -19,6 +19,8 @@ On top of that base:
 | Stopped mid-run with Ctrl+C, then restarted | The cut-off run was marked interrupted and the work redone from the start as attempt 2, all three claims passed |
 | The same file sent again | Ignored, nothing re-run |
 | Two-voice briefing | Played in two voices; wording tightened after listening |
+| Challenge mode with Gemini: a mistake planted on purpose | Claude caught it, the worker fixed it on attempt 2, Gemini agreed with the fix |
+| `watch.py --gemini --brief`: a file dropped into `inbox/` | Checked in 10 seconds (about 1p), a two-voice briefing appeared in the dashboard's player 9 seconds later and played there |
 
 Precisely what "always-on" means here: the watcher runs on one computer and waits for files in a local folder. It isn't yet deployed as a hosted service; running it in a cloud sandbox is the next step (see the experimental `sparkles` branch).
 
