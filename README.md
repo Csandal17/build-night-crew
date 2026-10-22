@@ -112,3 +112,7 @@ A spoken handover for when you've been away. The script is written by code from 
 - `check_keys.py`: checks every API key with one tiny call each.
 
 The first three files work for any crew. `crew.py` and `sources/` are the example to adapt or swap out.
+
+## Licence
+
+The code is MIT licensed (see `LICENSE`), so you're free to use and adapt it. The excerpts in `sources/` are short quotations from NHS web pages, not covered by that licence. Each file names its page and URL, and the text belongs to the NHS.
