@@ -2,6 +2,8 @@
 
 A crew of AI agents that check each other's work, with a shared task board, a hard budget on every run and live cost tracking per agent. Built for Moonfire Build Night (22 Oct 2026, Sparkles Cloud Crew track).
 
+🏆 Awarded **Best Project Built with ElevenLabs** at Moonfire Build Night, for the always-on SRE crew and its two-voice spoken briefings.
+
 On top of that base:
 - **Always-on mode:** the crew waits for work in an inbox, wakes only when something arrives, recovers after a restart, and keeps to a daily spending cap.
 - **An independent second reviewer:** Gemini re-checks every claim Claude passes, and a claim only counts if both agree.
